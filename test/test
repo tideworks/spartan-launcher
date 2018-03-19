@@ -1,0 +1,7 @@
+#!/bin/bash
+[[ -d tst-output ]] || mkdir tst-output
+for i in `seq 1 $1`;
+do
+  ./spartan genesis "test-file.$i.json.gz" >tst-output/test$i.out 2>tst-output/test$i.err &
+done
+

@@ -1,0 +1,255 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.tideworks.etl</groupId>
+  <artifactId>Spartan</artifactId>
+  <packaging>jar</packaging>
+  <version>1.0-SNAPSHOT</version>
+  <name>spartan</name>
+  <url>http://maven.apache.org</url>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.versioned.jar.file>${project.artifactId}-${project.version}.jar</project.versioned.jar.file>
+    <project.unversioned.jar.file>${project.artifactId}.jar</project.unversioned.jar.file>
+    <javassist.version>3.20.0-GA</javassist.version>
+    <logback.version>1.1.2</logback.version>
+ </properties>
+
+  <!-- If a deploy goal is executed, define the repositories here -->
+  <distributionManagement>
+      <repository>
+          <snapshots>
+            <enabled>false</enabled>
+          </snapshots>
+          <id>lwartifactory-releases</id>
+          <name>Tideworks Release-Builds Artifactory Repository</name>
+          <url>http://lwpeartifabld.tideworks.com:8080/artifactory/tideworks-builds/</url>
+      </repository>
+      <snapshotRepository>
+          <id>lwartifactory-snapshots</id>
+          <uniqueVersion>false</uniqueVersion>
+          <name>Tideworks SNAPSHOT-Builds Artifactory Repository</name>
+          <url>http://lwpeartifabld.tideworks.com:8080/artifactory/libs-snapshot-local/</url>
+      </snapshotRepository>
+  </distributionManagement>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.0</version>
+        <configuration>
+          <source>1.8</source>
+          <target>1.8</target>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>2.6</version>
+        <configuration>
+          <archive>
+            <index>true</index>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+              <addClasspath>true</addClasspath>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>1.7</version>
+        <executions>
+          <execution>
+          <id>spartan-fifopipeoutputstream</id>
+          <phase>compile</phase>
+          <goals>
+              <goal>run</goal>
+          </goals>
+          <configuration>
+              <exportAntProperties>true</exportAntProperties>
+              <target>
+                 <property name="runtime_classpath" refid="maven.compile.classpath"/>
+                 <exec executable="javah">
+                     <arg value="-cp"/>
+                     <arg value="${runtime_classpath}"/>
+                     <arg value="-d"/>
+                     <arg value="${basedir}/src/main/cpp"/>
+                     <arg value="FifoPipeOutputStream"/>
+                 </exec>
+              </target>
+          </configuration>
+          </execution>
+          <execution>
+          <id>spartan-launchprogram</id>
+          <phase>compile</phase>
+          <goals>
+              <goal>run</goal>
+          </goals>
+          <configuration>
+              <exportAntProperties>true</exportAntProperties>
+              <target>
+                 <property name="runtime_classpath" refid="maven.compile.classpath"/>
+                 <exec executable="javah">
+                     <arg value="-cp"/>
+                     <arg value="${runtime_classpath}"/>
+                     <arg value="-d"/>
+                     <arg value="${basedir}/src/main/cpp"/>
+                     <arg value="spartan.LaunchProgram"/>
+                 </exec>
+              </target>
+          </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>com.googlecode.cmake-maven-project</groupId>
+        <artifactId>cmake-maven-plugin</artifactId>
+        <version>3.7.2-b1</version>
+        <executions>
+          <execution>
+            <id>cmake-generate</id>
+            <goals>
+              <goal>generate</goal>
+            </goals>
+            <configuration>
+              <sourcePath>${basedir}/src/main/cpp</sourcePath>
+              <targetPath>${cmake.target.path}</targetPath>
+              <generator>${cmake.generator}</generator>
+              <classifier>linux-x86_64</classifier>
+              <environmentVariables>
+                <!-- <key>value</key> -->
+                <spartan_build_dir>${cmake.build.path}</spartan_build_dir>
+              </environmentVariables>
+              <options>
+                <!--
+                  Optional: One or more options found at http://www.cmake.org/cmake/help/v2.8.10/cmake.html#section_Options
+                  For example:
+                -->
+                <!--<option>-DBUILD_THIRDPARTY:bool=off</option> -->
+              </options>
+            </configuration>
+          </execution>
+          <execution>
+            <id>cmake-compile</id>
+            <goals>
+              <goal>compile</goal>
+            </goals>
+            <configuration>
+              <projectDirectory>${cmake.target.path}</projectDirectory>
+              <classifier>linux-x86_64</classifier>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>2.4.3</version>
+        <executions>
+          <execution>
+            <id>copy-resources</id>
+            <phase>package</phase>
+            <goals>
+              <goal>copy-resources</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>${basedir}/conf</directory>
+                </resource>
+                <resource>
+                  <directory>${basedir}/test</directory>
+                  <excludes>
+                    <exclude>cpp/**/*</exclude>
+                  </excludes>
+                  <includes>
+                    <include>test</include>
+                  </includes>
+                </resource>
+              </resources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-assembly-plugin</artifactId>
+        <version>2.6</version>
+        <configuration>
+          <descriptors>
+            <descriptor>src/main/assembly/assembly.xml</descriptor>
+          </descriptors>
+        </configuration>
+        <executions>
+          <execution>
+            <id>make-assembly</id> <!-- this is used for inheritance merges -->
+            <phase>package</phase> <!-- bind to the packaging phase -->
+            <goals>
+              <goal>single</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <phase>install</phase>
+            <goals>
+              <goal>copy-dependencies</goal>
+            </goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>linux64</id>
+      <activation>
+        <os>
+          <name>Linux</name>
+          <arch>!i386</arch>
+        </os>
+      </activation>
+      <properties>
+        <cmake.generator>Unix Makefiles</cmake.generator>
+        <cmake.target.path>${project.build.directory}/cmake</cmake.target.path>
+        <cmake.build.path>${project.build.directory}/cmake/build</cmake.build.path>
+        <cmake.rel.build.path>${project.build.directory}/cmake/build/Release</cmake.rel.build.path>
+      </properties>
+    </profile>
+  </profiles>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.javassist</groupId>
+      <artifactId>javassist</artifactId>
+      <version>${javassist.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <version>${logback.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-core</artifactId>
+      <version>${logback.version}</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+</project>

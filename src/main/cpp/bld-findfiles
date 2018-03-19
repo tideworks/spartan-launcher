@@ -1,0 +1,2 @@
+#!/bin/bash
+g++ -Wall -fPIC -std=gnu++11 -D_DEBUG -DTEST_FINDFILES findfiles.cpp format2str.cpp spartan-exception.cpp log.cpp -o tst-findfiles
