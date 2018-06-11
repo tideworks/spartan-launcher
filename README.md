@@ -459,7 +459,7 @@ The normal posture is that multiple instances of a worker child process sub comm
 
 **NOTE:** *Currently the `spartan` client mode does not respond to Control-C - the child process at the other end of the pipe it is reading from can instead be caused to terminate by using `kill -TERM` on its pid, which the client mode will sense as the pipe will indicate no more input to be read.*
 
-## `spartan` road map
+## `spartan` road map - a hat tip to reactive programming
 
 Spartan has been in production use for over a year, but its development began back in 2015. It originated when C++11 and Java 8 were new. Now C++17 and Java 10 are the latest. In the Java community, the Jetbrains Kotlin language has been making an impact (with quite the boost from Google's adoption of Kotlin for Android programming).
 
@@ -632,12 +632,12 @@ Also, the new `Spartan.invokeCommandEx(...)` method still remains to be implemen
 
 Working with the lambda-centric **spartan** `Flow` interfaces is rather eye opening in itself - it is a much more accomodating programming model than the `Flow` interfaces programming model introduced in Java 9. Frankly, that was the old style of Java programming that predates Java 8 and it is unfortunate that reactive programming for Java, as introduced in Java 9, was based on this (the reactive programming standard it is adhering to is just plain out of date in respect to contemporary Java programming practices).
 
-One thing that will be observed is the **spartan** `Flow` interfaces deal with `InputStream` and `OutputStream` as the intent is to allow direct use of the stream communication pipes to the child worker process. The Java 9 `Flow` approach uses generic type templating and passes materialized objects to a subscriber. My personal use of **spartan** child worker processes to date is such that their output is consumed by a special zero-garbage text line reader class and then regular expressions in combination to `CharSequence` are used to match on a command syntax. Consequently a child worker process can be monitored by a supevisor in an infinitely running 24/7 manner and yet generate virtually no heap garbage - a desirable characteristic.
+One thing that will be noticed is that the **spartan** `Flow` interfaces deal with `InputStream` and `OutputStream`. The intent is to allow direct use of the stream communication pipes to the child worker process. The Java 9 `Flow` approach uses generic type templating and passes materialized objects to a subscriber. My personal use of **spartan** child worker processes to date is such that their output is consumed by a special zero-garbage text line reader class in combination with regular expressions acting on a `CharSequence` buffer, and which match some simple command language syntax. Consequently a child worker process can be monitored by a supevisor in an infinitely running 24/7 manner and yet generate virtually no heap garbage - a desirable characteristic.
 
 An object serialization abstraction layer could further be devised on top of this API, though, if one preferred to work with Java objects instead. 
 
 ## Conclusion
 
-In other programming languages, what **spartan** empowers would perhaps not be very special. Concurrent programming via processes is a rather ancient practice in computing. All manner of stalwart programs that run as services on Linux, like PostreSQL, MySQL, Redis (many others) - and desktop applications such as Chrome browser and lately the Firefox brower - utilize multi-process concurrent programming as core to how they are designed and operate.
+In other programming languages what **spartan** empowers would perhaps not be very special. Concurrent programming via processes is a rather ancient practice in computing. All manner of stalwart programs that run as services on Linux, like PostreSQL, MySQL, Redis (many others) - and desktop applications such as Chrome browser and lately the Firefox brower - utilize multi-process concurrent programming as core to how they are designed and operate.
 
 However, for the Java language, where this manner of programming now becomes so facile, its very much like a new landscape of program architecture is presenting itself. Enjoy.
