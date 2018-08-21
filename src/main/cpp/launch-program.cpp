@@ -32,11 +32,12 @@ limitations under the License.
 #include <spawn.h>
 #include <cxxabi.h>
 #include <algorithm>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include "session-state.h"
 #include "process-cmd-dispatch-info.h"
 #include "path-concat.h"
 #include "format2str.h"
-#include "spartan-exception.h"
 #include "fifo-pipe.h"
 #include "log.h"
 #include "spartan_LaunchProgram.h"
@@ -56,15 +57,17 @@ extern char **environ;
 static volatile bool termination_flag = false;
 
 // RAII-related declarations for the pipe descriptors (to clean these up if exception thrown)
-struct pipe_fd_t {
-  const int fd;
+struct fd_t {
+  int fd;
 };
 
-static auto const cleanup_pipe_fd = [](pipe_fd_t *p) {
-  if (p != nullptr) {
+static auto const fd_cleanup = [](fd_t *p) {
+  if (p != nullptr && p->fd != -1) {
     close(p->fd);
+    p->fd = -1;
   }
 };
+using fd_cleanup_t = decltype(fd_cleanup);
 
 // forward declaration
 static std::string find_program_path(const char * const prog, const char * const path_var_name);
@@ -134,38 +137,78 @@ static std::string find_program_path(const char * const prog, const char * const
   throw find_program_path_exception(format2str(err_msg_fmt, prog, path_var_name));
 }
 
-static std::tuple<pid_t,int> spawn_program(int argc, char **argv, const char * const prog_file,
-                                           const char * const prog_path) {
-  const auto argc_dup = argc + 1; // bump up by one for added -pipe= option
-  char** const argv_dup = (char**) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
-  argv_dup[0] = const_cast<char*>(prog_path); // file path of program to be spawned
+#define USE_UNIX_SOCKET 1
+
+#if USE_UNIX_SOCKET
+static void init_sockaddr(const char *const uds_sock_name, size_t name_len, sockaddr_un &addr, socklen_t &addr_len) {
+  memset(&addr, 0, sizeof(sockaddr_un));
+  addr.sun_family = AF_UNIX;
+  auto const path_buf_end = sizeof(addr.sun_path) - 1;
+  strncpy(addr.sun_path, uds_sock_name, path_buf_end);
+  addr.sun_path[path_buf_end] = '\0';
+  addr.sun_path[0] = '\0';
+  addr_len = sizeof(sockaddr_un) - (sizeof(addr.sun_path) - name_len);
+}
+#endif
+
+static std::tuple<pid_t, int, std::string> spawn_program(int argc, char **argv, const char * const prog_file,
+                                                         const char * const prog_path)
+{
+  auto const argc_dup = argc + 1; // bump up by one for added -pipe= option
+  char**const argv_dup = (char**) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
+  argv_dup[0] = strdupa(prog_path); // file path of program to be spawned
   argv_dup[1] = nullptr; // command line option conveys pipe file descriptors to spawned program
   for(int i = 2, j = 1; j < argc; i++, j++) {
     argv_dup[i] = argv[j];
   }
   argv_dup[argc_dup] = nullptr; // sentinel entry at end of argv array (and argv array convention)
 
+#if USE_UNIX_SOCKET
+  auto const uds_socket_name = make_fifo_pipe_name(progpath(), "JLauncher_UDS");
+  auto const pipe_optn = format2str("-pipe=%s", uds_socket_name.c_str());
+  argv_dup[1] = strdupa(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
+
+  fd_t read_fd{ socket(AF_UNIX, SOCK_DGRAM, 0) };
+  if (read_fd.fd < 0) {
+    const char* const err_msg_fmt = "failed creating parent unix socket for i/o to spawned program subcommand %s: %s";
+    throw spawn_program_exception(format2str(err_msg_fmt, argv_dup[2], strerror(errno)));
+  }
+
+  std::unique_ptr<fd_t, fd_cleanup_t> read_fd_sp(&read_fd, fd_cleanup);
+
+  sockaddr_un server_address;
+  socklen_t address_length;
+  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+
+  if (bind(read_fd_sp->fd, (const sockaddr*) &server_address, address_length) < 0) {
+    const char err_msg_fmt[] = "failed binding parent unix socket for i/o to spawned program subcommand %s: %s";
+    throw spawn_program_exception(format2str(err_msg_fmt, argv_dup[2], strerror(errno)));
+  }
+#else
   int pipefd[] = { 0, 0 };
   if (pipe(pipefd) == -1) {
     const char * const err_msg_fmt = "failed creating pipe for i/o to spawned program: %s";
     throw spawn_program_exception(format2str(err_msg_fmt, strerror(errno)));
   }
-  const std::string pipe_optn { format2str("-pipe=read:%d,write:%d", pipefd[0], pipefd[1]) };
+  const std::string pipe_optn{ format2str("-pipe=read:%d,write:%d", pipefd[0], pipefd[1]) };
   argv_dup[1] = const_cast<char*>(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
 
-  pipe_fd_t pipe_read_fd  = { pipefd[0] };
-  pipe_fd_t pipe_write_fd = { pipefd[1] };
-  std::unique_ptr<pipe_fd_t,decltype(cleanup_pipe_fd)> pipe_read_fd_sp(&pipe_read_fd, cleanup_pipe_fd);
-  std::unique_ptr<pipe_fd_t,decltype(cleanup_pipe_fd)> pipe_write_fd_sp(&pipe_write_fd, cleanup_pipe_fd);
+  fd_t  read_fd{ pipefd[0] };
+  fd_t write_fd{ pipefd[1] };
+  std::unique_ptr<fd_t, fd_cleanup_t>  read_fd_sp(&read_fd,  fd_cleanup);
+  std::unique_ptr<fd_t, fd_cleanup_t> write_fd_sp(&write_fd, fd_cleanup);
+#endif
 
   posix_spawnattr_t attr;
   auto rtn = posix_spawnattr_init(&attr);
   if (rtn != 0) {
-    const char * const err_msg_fmt = "could not initialize spawn attributes object: %d";
+    const char err_msg_fmt[] = "could not initialize spawn attributes object: %d";
     throw spawn_program_exception(format2str(err_msg_fmt, rtn));
   }
-  auto const cleanup = [](posix_spawnattr_t*p) {
-    posix_spawnattr_destroy(p);
+  auto const cleanup = [](posix_spawnattr_t *p) {
+    if (p != nullptr) {
+      posix_spawnattr_destroy(p);
+    }
   };
   std::unique_ptr<posix_spawnattr_t, decltype(cleanup)> attr_sp(&attr, cleanup);
   posix_spawnattr_setflags(&attr, POSIX_SPAWN_USEVFORK);
@@ -178,37 +221,132 @@ static std::tuple<pid_t,int> spawn_program(int argc, char **argv, const char * c
   pid_t pid = 0;
   rtn = posix_spawnp(&pid, prog_file, nullptr, &attr, argv_dup, environ);
   if (rtn != 0) {
-    const char * const err_msg_fmt = "invocation of posix_spawnp() failed: %d";
+    const char err_msg_fmt[] = "invocation of posix_spawnp() failed: %d";
     throw spawn_program_exception(format2str(err_msg_fmt, rtn));
   }
 
-  return std::make_tuple(pid,pipe_read_fd_sp.release()->fd);
+#if USE_UNIX_SOCKET
+  return std::make_tuple(pid, read_fd_sp.release()->fd, std::move(uds_socket_name));
+#else
+  return std::make_tuple(pid, read_fd_sp.release()->fd, std::string{});
+#endif
 }
 
-static std::tuple<pid_t,int,std::string> launch_program_helper(int argc, char **argv, std::string& prog_path) {
-  const char * const prog_name = strdupa(prog_path.c_str()); // starts out as just program name, so copy this to retain
+static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char **argv, std::string& prog_path) {
+  const char *const prog_name = strdupa(prog_path.c_str()); // starts out as just program name, so copy this to retain
   if (strchr(prog_name, '/') == nullptr && strchr(prog_name, '\\') == nullptr) {
     prog_path = find_program_path(prog_name, "PATH"); // determine fully qualified path to the program
   } else {
     // verify that the specified program path exist and is a file or symbolic link
     struct stat statbuf;
     if (stat(prog_name, &statbuf) == -1 || !((statbuf.st_mode & S_IFMT) == S_IFREG ||
-                                             (statbuf.st_mode & S_IFMT) == S_IFLNK)) {
-      const char * const err_msg_fmt = "specified program path '%s' invalid: %s";
+                                             (statbuf.st_mode & S_IFMT) == S_IFLNK))
+    {
+      const char err_msg_fmt[] = "specified program path '%s' invalid: %s";
       throw find_program_path_exception(format2str(err_msg_fmt, prog_name, strerror(errno)));
     }
   }
 
-  const auto rslt = spawn_program(argc, argv, prog_name, prog_path.c_str());
-  const pid_t pid = std::get<0>(rslt);
-  pipe_fd_t pipe_read_fd = { std::get<1>(rslt) }; // spawn the program
+  auto rslt = spawn_program(argc, argv, prog_name, prog_path.c_str());
 
-  std::unique_ptr<pipe_fd_t,decltype(cleanup_pipe_fd)> pipe_read_fd_sp(&pipe_read_fd, cleanup_pipe_fd);
+  pid_t const pid = std::get<0>(rslt);
+  fd_t read_fd{ std::get<1>(rslt) }; // spawn the program
+  std::unique_ptr<fd_t, fd_cleanup_t> read_fd_sp(&read_fd, fd_cleanup);
 
+#if USE_UNIX_SOCKET
+  std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
+
+  sockaddr_un server_address;
+  socklen_t address_length;
+  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+
+  size_t bufsize = 0;
+
+  auto bytes_received = recvfrom( read_fd_sp->fd,
+                                  &bufsize,
+                                  sizeof(bufsize),
+                                  0,
+                                  (sockaddr *) &server_address,
+                                  &address_length);
+  if (bytes_received < 0) {
+    const char err_msg_fmt[] = "%s() failed getting fifo pipe name size for spawned child program subcommand %s:\n%s";
+    throw spawn_program_exception(format2str(err_msg_fmt, "recvfrom", argv[1], strerror(errno)));
+  }
+  assert(bytes_received == (long) sizeof(bufsize));
+  assert(bufsize > 0);
+  printf("DEBUG: ***** spawned child program subcommand %s received fifo pipe name size: %lu *****\n", argv[1], bufsize);
+
+  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  auto buf = (char*) alloca(bufsize + 1);
+
+  bytes_received = recvfrom(read_fd_sp->fd,
+                            buf,
+                            bufsize,
+                            0,
+                            (sockaddr *) &server_address,
+                            &address_length);
+  if (bytes_received < 0) {
+    const char err_msg_fmt[] = "%s() failed getting fifo pipe name for spawned child program subcommand %s:\n%s";
+    throw spawn_program_exception(format2str(err_msg_fmt, "recvfrom", argv[1], strerror(errno)));
+  }
+  assert(bytes_received == (long) bufsize);
+  buf[bufsize] = '\0'; // null terminate the C string
+  printf("DEBUG: ***** spawned child program subcommand %s received fifo pipe name: *****\n\t\"%s\"\n", argv[1], buf);
+
+  std::string fifo_pipe_name{ buf };
+
+  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  int integer_buffer = 0;
+
+  bytes_received = recvfrom(read_fd_sp->fd,
+                            &integer_buffer,
+                            sizeof(integer_buffer),
+                            0,
+                            (sockaddr *) &server_address,
+                            &address_length);
+  if (bytes_received < 0) {
+    const char err_msg_fmt[] = "%s() failed getting process pid for spawned child program subcommand %s:\n%s";
+    throw spawn_program_exception(format2str(err_msg_fmt, "recvfrom", argv[1], strerror(errno)));
+  }
+  assert(bytes_received == (long) sizeof(integer_buffer));
+  assert(integer_buffer > 0);
+  printf("DEBUG: ***** spawned child program subcommand %s received process pid: %d *****\n", argv[1], integer_buffer);
+
+  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+
+  msghdr child_msg;
+  memset(&child_msg, 0, sizeof(child_msg));
+  child_msg.msg_name = &server_address;
+  child_msg.msg_namelen = address_length;
+  struct {
+    cmsghdr cmsg;
+    int child_rd_fd; // will be the returned value from recvmsg() call
+  }
+      cmsg_payload;
+  child_msg.msg_control = &cmsg_payload; // make place for the ancillary message to be received
+  child_msg.msg_controllen = sizeof(cmsg_payload);
+
+  auto rc = recvmsg(read_fd_sp->fd, &child_msg, 0);
+  if (rc < 0) {
+    const char err_msg_fmt[] = "%s() failed getting i/o fd for spawned child program subcommand %s:\n%s";
+    throw spawn_program_exception(format2str(err_msg_fmt, "recvmsg", argv[1], strerror(errno)));
+  }
+  const cmsghdr* const cmsg = CMSG_FIRSTHDR(&child_msg);
+  assert(cmsg != nullptr);
+  assert(cmsg->cmsg_type == SCM_RIGHTS);
+  if (cmsg == nullptr || cmsg->cmsg_type != SCM_RIGHTS) {
+    const char *const err_msg_fmt = "no file descriptor returned from spawned child program subcommand %s";
+    throw spawn_program_exception(format2str(err_msg_fmt, argv[1]));
+  }
+  printf("DEBUG: ***** spawned child program subcommand %s received i/o fd: %d *****\n", argv[1], cmsg_payload.child_rd_fd);
+
+  fd_t child_read_fd{ cmsg_payload.child_rd_fd };
+  std::unique_ptr<fd_t, fd_cleanup_t> child_read_fd_sp(&child_read_fd, fd_cleanup);
+#else
   int n_read = 0, n_writ = 0;
 
   // get the FIFO named pipe for reading output from the spawned program child process
-  const std::string fifo_pipe_name { [&n_read,&n_writ](const int fd) -> std::string {
+  std::string fifo_pipe_name { [&n_read,&n_writ](const int fd) -> std::string {
     std::stringstream ss;
     char iobuf[256];
     for(;;) {
@@ -225,29 +363,33 @@ static std::tuple<pid_t,int,std::string> launch_program_helper(int argc, char **
       n_writ += n;
     }
     return ss.str();
-  }(pipe_read_fd.fd) };
+  }(read_fd_sp->fd) };
 
   log(LL::DEBUG, "%s(): child process FIFO named pipe: '%s'\n\tfrom child process pipe: %d read, %d written",
-      __func__, fifo_pipe_name.c_str(), n_read, n_writ);
+      __func__, uds_socket_name.c_str(), n_read, n_writ);
+#endif
 
   int status = 0;
   do {
     if (waitpid(pid, &status, 0) == -1) {
-      const char *const err_msg_fmt = "failed waiting for launcher process (pid:%d): %s";
+      const char err_msg_fmt[] = "failed waiting for launcher process (pid:%d): %s";
       throw spawn_program_exception(format2str(err_msg_fmt, pid, strerror(errno)));
     }
     if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
-      const char *const err_msg_fmt = "interrupted waiting for launcher process (pid:%d)";
+      const char err_msg_fmt[] = "interrupted waiting for launcher process (pid:%d)";
       throw interrupted_exception(format2str(err_msg_fmt, pid));
     }
   } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
-  pipe_fd_t child_read_fd = { open_fifo_pipe(fifo_pipe_name.c_str(), O_RDONLY | O_NONBLOCK) };
+#if USE_UNIX_SOCKET
+  printf("DEBUG: ***** spawned launcher process (pid:%d) of child program subcommand %s completed *****\n", pid, argv[1]);
+#else
+  fd_t child_read_fd{ open_fifo_pipe(fifo_pipe_name.c_str(), O_RDONLY | O_NONBLOCK) };
+  std::unique_ptr<fd_t, fd_cleanup_t> child_read_fd_sp(&child_read_fd, fd_cleanup);
+#endif
 
-  std::unique_ptr<pipe_fd_t,decltype(cleanup_pipe_fd)> child_read_fd_sp(&child_read_fd, cleanup_pipe_fd);
-
-  auto const get_child_process_pid = [&fifo_pipe_name](int fd) -> pid_t {
-    static const char * const func_name = "get_child_process_pid";
+  auto const get_child_process_pid = [&fifo_pipe_name](int const fd) -> pid_t {
+    static const char *const func_name = "get_child_process_pid";
     int read_attempts = 30; // 30 x 100 ms = 3 secs
     struct timespec tim = { 0, 100000000L }, tim2; // 100 ms
     char iobuf[8];
@@ -282,26 +424,30 @@ static std::tuple<pid_t,int,std::string> launch_program_helper(int argc, char **
     } else  if (n != sizeof(iobuf)) {
       throw spawn_program_exception("did not read expected amount of data for transmitted child process pid");
     }
-    const char * const child_pid_str = strndupa(iobuf, sizeof(iobuf));
+    const char *const child_pid_str = strndupa(iobuf, sizeof(iobuf));
     // make sure that the returned child process pid can be converted into an integer without error
     errno = 0;
-    const unsigned long int rtn_pid = strtoul(child_pid_str, nullptr, 16);
+    unsigned long int const rtn_pid = strtoul(child_pid_str, nullptr, 16);
     if (errno != 0) {
       // returned child pid is unexpectedly corrupt so throwing exception as a fatal error condition
-      const char * const err_msg_fmt = "invalid child process pid [%lu] returned on FIFO read pipe \"%s\":\n\t%s";
+      const char err_msg_fmt[] = "invalid child process pid [%lu] returned on UDS socket \"%s\":\n\t%s";
       throw spawn_program_exception(format2str(err_msg_fmt, rtn_pid, fifo_pipe_name.c_str(), strerror(errno)));
     }
     log(LL::DEBUG, "%s() returning child process pid:%lu", func_name, rtn_pid);
     return static_cast<pid_t >(rtn_pid);
   };
 
-  int flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
+  auto const flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
   fcntl(child_read_fd_sp->fd, F_SETFL, flags | O_NONBLOCK);
 
-  const pid_t child_pid = get_child_process_pid(child_read_fd_sp->fd);
+  pid_t const child_pid = get_child_process_pid(child_read_fd_sp->fd);
 
-  flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
+#if USE_UNIX_SOCKET
   fcntl(child_read_fd_sp->fd, F_SETFL, flags & ~O_NONBLOCK);
+  printf("DEBUG: ***** spawned child program subcommand %s pid: %d *****\n", argv[1], child_pid);
+#else
+  fcntl(child_read_fd_sp->fd, F_SETFL, flags);
+#endif
 
   // return pid, fd, and fifo pipe name to launched child process
   return std::make_tuple(child_pid, child_read_fd_sp.release()->fd, std::move(fifo_pipe_name));
@@ -359,7 +505,7 @@ static bool check_result(JNIEnv *env, const char *exception_cls, T item,
  * Signature: (ILjava/lang/String;)V
  */
 extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_log
-    (JNIEnv *env, jclass cls, jint level, jstring msg) {
+    (JNIEnv *env, jclass /*cls*/, jint level, jstring msg) {
   struct {
     jboolean    isCopy;
     jstring     j_str;
@@ -379,19 +525,17 @@ extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_log
 }
 
 /*
- * Class:     spartan_LaunchProgram
- * Method:    invokeProgramCommand
+ * Function:  invoke_spartan_subcommand
  * Signature: (Ljava/lang/String;[Ljava/lang/String;)Lspartan/Spartan/InvokeResponse;
  */
-extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeProgramCommand
-    (JNIEnv *env, jclass cls, jstring progName, jobjectArray args) {
+static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, jstring progName, jobjectArray args) {
   const jint argc = env->GetArrayLength(args);
-  using argv_str_t = struct argv_str {
+  struct argv_str_t {
     jboolean  isCopy;
     jstring   j_str;
   };
-  argv_str * const argv_strs = (argv_str_t*)  alloca((argc + 1) * sizeof(argv_str_t));
-  const char* * const c_strs = (const char**) alloca((argc + 2) * sizeof(const char*));
+  auto * const argv_strs = (argv_str_t*)  alloca((argc + 1) * sizeof(argv_str_t));
+  const auto * * const c_strs = (const char**) alloca((argc + 2) * sizeof(const char*));
   c_strs[argc + 1] = nullptr; // argv convention of end-of-array null ptr sentinel
   for(int i = 0; i <= argc; i++) {
     auto &argv_str = argv_strs[i];
@@ -429,10 +573,10 @@ extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeProgramCom
   std::string prog_path(c_strs[0]);
   std::string fifo_pipe_name;
   try {
-    const auto rslt = launch_program_helper(argc + 1, (char **) c_strs, prog_path);
+    auto rslt = launch_program_helper(argc + 1, (char **) c_strs, prog_path);
     child_pid = std::get<0>(rslt);
     fd = {std::get<1>(rslt)};
-    fifo_pipe_name = std::get<2>(rslt);
+    fifo_pipe_name = std::move(std::get<2>(rslt));
   } catch(const interrupted_exception& ex) {
     jclass const ex_cls = env->FindClass("java/lang/InterruptedException");
     assert(ex_cls != nullptr);
@@ -450,9 +594,8 @@ extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeProgramCom
     return nullptr;
   }
 
-  pipe_fd_t child_read_fd = { fd };
-
-  std::unique_ptr<pipe_fd_t,decltype(cleanup_pipe_fd)> child_read_fd_sp(&child_read_fd, cleanup_pipe_fd);
+  fd_t child_read_fd{ fd };
+  std::unique_ptr<fd_t, fd_cleanup_t> child_read_fd_sp(&child_read_fd, fd_cleanup);
 
   auto const find_class = [env,&prog_path] (const char *cls_name) -> jclass {
     jclass const found_cls = env->FindClass(cls_name);
@@ -601,7 +744,17 @@ extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommand
   };
   std::unique_ptr<utf_str_wrpr_t, decltype(deref_jobjs)> sp_progpath_utf_str(&utf_str_wrpr, deref_jobjs);
 
-  return Java_spartan_LaunchProgram_invokeProgramCommand(env, cls, sp_progpath_utf_str->utf_str, args);
+  return invoke_spartan_subcommand(env, cls, sp_progpath_utf_str->utf_str, args);
+}
+
+/*
+ * Class:     spartan_LaunchProgram
+ * Method:    invokeCommandEx
+ * Signature: ([Ljava/lang/String;)Lspartan/Spartan/InvokeResponseEx;
+ */
+extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommandEx
+    (JNIEnv */*env*/, jclass /*cls*/, jobjectArray /*args*/) {
+  return nullptr;
 }
 
 static void killpid_helper(JNIEnv * const env, const pid_t pid, const int sig, const char * const sig_desc) {
@@ -686,6 +839,9 @@ extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_sysThreadInterrupt
   log(LL::DEBUG, "<< %s()", __func__);
 }
 
+enum class PidFileLocation : int { VAR_RUN_DIR = 1, USER_HOME_DIR, EXE_DIR, CURR_DIR, DONE };
+using PFL = PidFileLocation;
+
 /*
  * Class:     spartan_LaunchProgram
  * Method:    isFirstInstance
@@ -716,7 +872,6 @@ extern "C" JNIEXPORT jboolean JNICALL Java_spartan_LaunchProgram_isFirstInstance
   int rc = 0;
   static auto const func_name = __func__;
   const int pid_file_fd = [&full_path, &rc](const char * const prefix) -> int {
-    using PFL = enum class PidFileLocation : int { VAR_RUN_DIR = 1, USER_HOME_DIR, EXE_DIR, CURR_DIR, DONE };
     for(PFL kind = PFL::VAR_RUN_DIR; kind < PFL::DONE; kind = static_cast<PFL>((int)kind + 1)) {
       switch (kind) {
         case PFL::VAR_RUN_DIR:
@@ -758,7 +913,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_spartan_LaunchProgram_isFirstInstance
     return rtn;
   }
   rc = flock(pid_file_fd, LOCK_EX | LOCK_NB); // lock will be released when process terminates
-  if (rc) {
+  if (rc != 0) {
     rc = errno;
     if(rc == EWOULDBLOCK) {
       rtn = JNI_FALSE; // another instance is running

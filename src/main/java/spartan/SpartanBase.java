@@ -40,6 +40,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Stream;
 
+@SuppressWarnings({"WeakerAccess", "unused"})
 public class SpartanBase implements Spartan {
   private   static final String clsName = SpartanBase.class.getSimpleName();
   protected static final Lock _lock = new ReentrantLock();
@@ -59,7 +60,7 @@ public class SpartanBase implements Spartan {
       this.commandLine = commandLine;
       timeStamp = LocalDateTime.now();
     }
-    public Integer getPid() { return pid; }
+    public Integer  getPid() { return pid; }
     public String toString() {
       return format("%s pid:%d '%s'", timeStamp, pid, commandLine);
     }
@@ -112,6 +113,7 @@ public class SpartanBase implements Spartan {
         lock.unlock();
       }
     }
+    @SuppressWarnings("UnusedReturnValue")
     public boolean signalAll() {
       if (lock.tryLock()) try {
         condition.signalAll();
@@ -232,6 +234,7 @@ public class SpartanBase implements Spartan {
       int i = 1;
       try {
         do {
+          @SuppressWarnings("UnusedAssignment")
           int childpid = 0;
           final Optional<Integer> pid = _childProcesses.keySet()
               .stream()

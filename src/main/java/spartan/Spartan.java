@@ -18,6 +18,10 @@ limitations under the License.
 */
 package spartan;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+
+@SuppressWarnings("unused")
 public interface Spartan {
   default String getProgramName() { return ""; }
   default void supervisorShutdown() {}
@@ -26,10 +30,11 @@ public interface Spartan {
   default void childProcessCompletionNotify(int pid) {}
   default void supervisorDoCommand(String[] args, java.io.PrintStream rspStream) { rspStream.close(); }
 
-  static final class ThreadContext {
+  @SuppressWarnings("WeakerAccess")
+  final class ThreadContext {
     final Thread currThrd;
     private final long sysThrdID;
-    public ThreadContext() {
+    private ThreadContext() {
       this.currThrd = Thread.currentThread();
       this.sysThrdID = LaunchProgram.getSysThreadID();
     }
@@ -48,50 +53,60 @@ public interface Spartan {
     }
   }
 
-  static final class InvokeResponse {
+  class InvokeResponse {
     public final int childPID;
-    public final java.io.InputStream inStream;
-    public InvokeResponse(int childPID, java.io.InputStream inStream) {
+    public final InputStream inStream;
+    InvokeResponse(int childPID, InputStream inStream) {
       this.childPID = childPID;
       this.inStream = inStream;
     }
   }
 
+  class InvokeResponseEx extends InvokeResponse {
+    public final InputStream errStream;
+    public final OutputStream childInputStream;
+    InvokeResponseEx(int childPID, InputStream inStream, InputStream errStream, OutputStream childInputStream) {
+      super(childPID, inStream);
+      this.errStream = errStream;
+      this.childInputStream = childInputStream;
+    }
+  }
+
   @SuppressWarnings("serial")
-  static final class InvokeCommandException extends Exception {
+  final class InvokeCommandException extends Exception {
     public InvokeCommandException(String message) { super(message); }
     public InvokeCommandException(String message, Throwable cause) { super(message, cause); }
   }
 
   @SuppressWarnings("serial")
-  static final class KillProcessException extends Exception {
+  final class KillProcessException extends Exception {
     public KillProcessException(String message) { super(message); }
     public KillProcessException(String message, Throwable cause) { super(message, cause); }
   }
 
   @SuppressWarnings("serial")
-  static final class KillProcessGroupException extends Exception {
+  final class KillProcessGroupException extends Exception {
     public KillProcessGroupException(String message) { super(message); }
     public KillProcessGroupException(String message, Throwable cause) { super(message, cause); }
   }
   // log level verbosity
-  static final int LL_FATAL = 6;
-  static final int LL_ERR   = 5;
-  static final int LL_WARN  = 4;
-  static final int LL_INFO  = 3;
-  static final int LL_DEBUG = 2;
-  static final int LL_TRACE = 1;
+  int LL_FATAL = 6;
+  int LL_ERR   = 5;
+  int LL_WARN  = 4;
+  int LL_INFO  = 3;
+  int LL_DEBUG = 2;
+  int LL_TRACE = 1;
 
   static void log(int level, String msg) {
     LaunchProgram.log(level, msg);
   }
-  static InvokeResponse invokeProgramCommand(String progName, String... args)
-      throws ClassNotFoundException, InvokeCommandException, InterruptedException {
-    return LaunchProgram.invokeProgramCommand(progName, args);
-  }
   static InvokeResponse invokeCommand(String... args)
       throws ClassNotFoundException, InvokeCommandException, InterruptedException {
     return LaunchProgram.invokeCommand(args);
+  }
+  static InvokeResponseEx invokeCommandEx(String... args)
+          throws ClassNotFoundException, InvokeCommandException, InterruptedException {
+    return LaunchProgram.invokeCommandEx(args);
   }
   static void killSIGINT(int pid) throws KillProcessException {
     LaunchProgram.killSIGINT(pid);

@@ -50,6 +50,7 @@ import spartan.annotations.ChildWorkerCommand;
 import spartan.annotations.SupervisorCommand;
 import spartan.annotations.SupervisorMain;
 
+@SuppressWarnings("unused")
 public final class test extends SpartanBase {
   private static final String clsName = test.class.getName();
   private static final String methodEntryExitFmt = "%s %s.%s(): @@@@@ %s test and print diagnostics output @@@@@%n";
@@ -60,11 +61,13 @@ public final class test extends SpartanBase {
     t.setName(String.format("%s-pool-thread-#%d", clsName, workerThreadNbr.getAndIncrement()));
     return t;
   });
+  @SuppressWarnings("WeakerAccess")
   protected static final Set<Integer> _pids = ConcurrentHashMap.newKeySet(53);
 
-  @SuppressWarnings("unchecked")
+  @SuppressWarnings({"unchecked", "UnusedReturnValue"})
   private static <T extends Exception, R> R uncheckedExceptionThrow(Exception t) throws T { throw (T) t; }
 
+  @SuppressWarnings("DuplicateThrows")
   @SupervisorMain
   public static void main(String[] args)
       throws MalformedURLException, IOException, URISyntaxException, ClassNotFoundException
@@ -86,7 +89,7 @@ public final class test extends SpartanBase {
     Files.write(cmdDspInfo_path, byteSerializedData, CREATE, TRUNCATE_EXISTING);
 
     // deserialize system properties and CommandDispatchInfo object from a file
-    spartan.CommandDispatchInfo reconstitutedInfo = null;
+    spartan.CommandDispatchInfo reconstitutedInfo;
     try (final InputStream inStrm = Files.newInputStream(cmdDspInfo_path, READ)) {
       try (final ObjectInputStream in = new ObjectInputStream(inStrm)) {
         final Properties sysProps = (Properties) in.readObject();

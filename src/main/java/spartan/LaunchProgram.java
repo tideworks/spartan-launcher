@@ -1,6 +1,6 @@
 /* LaunchProgram.java
 
-Copyright 2015 - 2017 Tideworks Technology
+Copyright 2015 - 2018 Tideworks Technology
 Author: Roger D. Voss
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,9 +25,9 @@ public class LaunchProgram {
     System.loadLibrary("spartan-shared");
   }
   public static native void log(int level, String msg);
-  public static native InvokeResponse invokeProgramCommand(String progName, String[] args)
-      throws ClassNotFoundException, InvokeCommandException, InterruptedException;
   public static native InvokeResponse invokeCommand(String[] args)
+      throws ClassNotFoundException, InvokeCommandException, InterruptedException;
+  public static native InvokeResponseEx invokeCommandEx(String[] args)
       throws ClassNotFoundException, InvokeCommandException, InterruptedException;
   public static native void killSIGINT(int pid) throws KillProcessException;
   public static native void killSIGKILL(int pid) throws KillProcessException;
