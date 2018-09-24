@@ -19,7 +19,6 @@ limitations under the License.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <string>
 #include <memory>
 #include <cassert>
 #include <sstream>
@@ -32,8 +31,6 @@ limitations under the License.
 #include <spawn.h>
 #include <cxxabi.h>
 #include <algorithm>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include "session-state.h"
 #include "process-cmd-dispatch-info.h"
 #include "path-concat.h"
@@ -47,27 +44,15 @@ using logger::log;
 using logger::LL;
 
 DECL_EXCEPTION(find_program_path)
-
+DECL_EXCEPTION(create_uds_socket)
+DECL_EXCEPTION(bind_uds_socket_name)
+DECL_EXCEPTION(obtain_rsp_stream)
 DECL_EXCEPTION(spawn_program)
-
 DECL_EXCEPTION(interrupted)
 
 extern char **environ;
 
 static volatile bool termination_flag = false;
-
-// RAII-related declarations for the pipe descriptors (to clean these up if exception thrown)
-struct fd_t {
-  int fd;
-};
-
-static auto const fd_cleanup = [](fd_t *p) {
-  if (p != nullptr && p->fd != -1) {
-    close(p->fd);
-    p->fd = -1;
-  }
-};
-using fd_cleanup_t = decltype(fd_cleanup);
 
 // forward declaration
 static std::string find_program_path(const char * const prog, const char * const path_var_name);
@@ -89,13 +74,138 @@ namespace launch_program {
       return std::make_tuple(std::string(prog), false);
     }
   }
+
+  SO_EXPORT void fd_cleanup_no_delete(fd_wrapper_t *p) {
+    if (p != nullptr && p->fd != -1) {
+      close(p->fd);
+      p->fd = -1;
+    }
+  }
+
+  SO_EXPORT void fd_cleanup_with_delete(fd_wrapper_t *p) {
+    if (p != nullptr && p->fd != -1) {
+      close(p->fd);
+      p->fd = -1;
+    }
+    delete p;
+  }
+
+  SO_EXPORT void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len) {
+    memset(&addr, 0, sizeof(sockaddr_un));
+    addr.sun_family = AF_UNIX;
+    auto const path_buf_end = sizeof(addr.sun_path) - 1;
+    strncpy(addr.sun_path, uds_sock_name.c_str(), path_buf_end);
+    addr.sun_path[path_buf_end] = '\0';
+    addr.sun_path[0] = '\0';
+    addr_len = sizeof(sockaddr_un) - (sizeof(addr.sun_path) - uds_sock_name.size());
+  }
+
+  SO_EXPORT fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg) {
+    auto fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (fd < 0) {
+      throw create_uds_socket_exception{ get_errmsg(errno) };
+    }
+
+    return fd_wrapper_sp_t{ new fd_wrapper_t{ fd }, &fd_cleanup_with_delete };
+  }
+
+  SO_EXPORT std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd) {
+    auto const progname = [](const char * const path) -> std::string {
+      char * const dup_path = strdupa(path);
+      return std::string(basename(dup_path));
+    }(s_progpath.c_str());
+
+    auto const uds_socket_name = make_fifo_pipe_name(progname.c_str(), "JLauncher_UDS");
+
+    auto socket_fd_sp = create_uds_socket([sub_cmd](int err_no) -> std::string {
+      const char err_msg_fmt[] = "failed creating parent uds socket for i/o to spawned program subcommand %s: %s";
+      return format2str(err_msg_fmt, sub_cmd, strerror(err_no));
+    });
+
+    sockaddr_un server_address;
+    socklen_t address_length;
+    init_sockaddr(uds_socket_name, server_address, address_length);
+
+    auto rc = bind(socket_fd_sp->fd, (const sockaddr*) &server_address, address_length);
+    if (rc < 0) {
+      const char err_msg_fmt[] = "failed binding parent uds socket for i/o to spawned program subcommand %s: %s";
+      auto err_msg = format2str(err_msg_fmt, sub_cmd, strerror(errno));
+      throw bind_uds_socket_name_exception{ std::move(err_msg) };
+    }
+
+    return std::make_tuple(std::move(socket_fd_sp), std::move(uds_socket_name));
+  }
+
+  SO_EXPORT std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
+                                                                      fd_wrapper_sp_t read_fd_sp)
+  {
+    static const char* const func_name = __FUNCTION__;
+
+    sockaddr_un server_address;
+    socklen_t address_length;
+    init_sockaddr(uds_socket_name, server_address, address_length);
+
+    pid_buffer_t pid_buffer;
+    memset(&pid_buffer, 0, sizeof(pid_buffer));
+
+    int line_nbr = __LINE__ + 1;
+    auto bytes_received = recvfrom( read_fd_sp->fd,
+                                    &pid_buffer,
+                                    sizeof(pid_buffer),
+                                    0,
+                                    (sockaddr *) &server_address,
+                                    &address_length);
+    if (bytes_received < 0) {
+      const char err_msg_fmt[] = "%d: %s() -> recvfrom(): failed reading pid and fd count from uds %s socket:\n\t%s";
+      auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), strerror(errno));
+      throw obtain_rsp_stream_exception{ std::move(err_msg) };
+    }
+    assert(bytes_received == (long) sizeof(pid_buffer));
+    assert(pid_buffer.pid > 0 && pid_buffer.fd_rtn_count > 0);
+
+    if (pid_buffer.fd_rtn_count != 1) {
+      const char err_msg_fmt[] = "%d: %s() -> expected exactly 1 read pipe fd count via uds %s socket - not %d";
+      auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), pid_buffer.fd_rtn_count);
+      throw obtain_rsp_stream_exception{ std::move(err_msg) };
+    }
+
+    init_sockaddr(uds_socket_name, server_address, address_length);
+
+    msghdr client_recv_msg;
+    memset(&client_recv_msg, 0, sizeof(client_recv_msg));
+    client_recv_msg.msg_name = &server_address;
+    client_recv_msg.msg_namelen = address_length;
+    pipe_fds_buffer_t cmsg_payload;
+    memset(&cmsg_payload, 0, sizeof(cmsg_payload));
+    client_recv_msg.msg_control = &cmsg_payload;
+    client_recv_msg.msg_controllen = sizeof(cmsg_payload); // necessary for CMSG_FIRSTHDR to return the correct value
+
+    auto rc = recvmsg(read_fd_sp->fd, &client_recv_msg, 0); line_nbr = __LINE__;
+    if (rc < 0) {
+      const char err_msg_fmt[] = "%d: %s() -> recvmsg(): no read pipe fd returned from uds %s socket:\n\t%s";
+      auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), strerror(errno));
+      throw obtain_rsp_stream_exception{ std::move(err_msg) };
+    }
+    const cmsghdr* const cmsg = CMSG_FIRSTHDR(&client_recv_msg);
+    assert(cmsg != nullptr);
+    assert(cmsg->cmsg_type == SCM_RIGHTS);
+    line_nbr = __LINE__ + 1;
+    if (cmsg == nullptr || cmsg->cmsg_type != SCM_RIGHTS) {
+      const char *const err_msg_fmt = "%d: %s() -> recvmsg(): no read pipe fd returned from uds %s socket:\n\t%s";
+      auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), "invalid datagram message");
+      throw obtain_rsp_stream_exception{ std::move(err_msg) };
+    }
+
+    assert(cmsg_payload.pipe_fds[0] > 0);
+    fd_wrapper_sp_t read_stream_fd_sp{ new fd_wrapper_t{ cmsg_payload.pipe_fds[0] }, &fd_cleanup_with_delete };
+
+    return std::make_tuple(pid_buffer.pid, std::move(read_stream_fd_sp));
+  }
 }
+
+using namespace launch_program;
 
 inline const char *progpath() { return launch_program::s_progpath.c_str(); }
-
-static void handle_fd_error(int err) {
-  throw spawn_program_exception(format2str("i/o error reading pipe from spawned program: %s", strerror(err)));
-}
 
 static std::string get_env_var(const char * const name) {
   char * const val = getenv(name);
@@ -137,22 +247,8 @@ static std::string find_program_path(const char * const prog, const char * const
   throw find_program_path_exception(format2str(err_msg_fmt, prog, path_var_name));
 }
 
-#define USE_UNIX_SOCKET 1
-
-#if USE_UNIX_SOCKET
-static void init_sockaddr(const char *const uds_sock_name, size_t name_len, sockaddr_un &addr, socklen_t &addr_len) {
-  memset(&addr, 0, sizeof(sockaddr_un));
-  addr.sun_family = AF_UNIX;
-  auto const path_buf_end = sizeof(addr.sun_path) - 1;
-  strncpy(addr.sun_path, uds_sock_name, path_buf_end);
-  addr.sun_path[path_buf_end] = '\0';
-  addr.sun_path[0] = '\0';
-  addr_len = sizeof(sockaddr_un) - (sizeof(addr.sun_path) - name_len);
-}
-#endif
-
-static std::tuple<pid_t, int, std::string> spawn_program(int argc, char **argv, const char * const prog_file,
-                                                         const char * const prog_path)
+static std::tuple<pid_t, fd_wrapper_sp_t, std::string> spawn_program(int argc, char **argv, const char * const prog_file,
+                                                                     const char * const prog_path)
 {
   auto const argc_dup = argc + 1; // bump up by one for added -pipe= option
   char**const argv_dup = (char**) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
@@ -163,41 +259,23 @@ static std::tuple<pid_t, int, std::string> spawn_program(int argc, char **argv, 
   }
   argv_dup[argc_dup] = nullptr; // sentinel entry at end of argv array (and argv array convention)
 
-#if USE_UNIX_SOCKET
-  auto const uds_socket_name = make_fifo_pipe_name(progpath(), "JLauncher_UDS");
+  auto uds_socket_name = make_fifo_pipe_name(progpath(), "JLauncher_UDS");
   auto const pipe_optn = format2str("-pipe=%s", uds_socket_name.c_str());
   argv_dup[1] = strdupa(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
 
-  fd_t read_fd{ socket(AF_UNIX, SOCK_DGRAM, 0) };
-  if (read_fd.fd < 0) {
-    const char* const err_msg_fmt = "failed creating parent unix socket for i/o to spawned program subcommand %s: %s";
-    throw spawn_program_exception(format2str(err_msg_fmt, argv_dup[2], strerror(errno)));
-  }
-
-  std::unique_ptr<fd_t, fd_cleanup_t> read_fd_sp(&read_fd, fd_cleanup);
+  fd_wrapper_sp_t read_fd_sp = create_uds_socket([subcmd = argv_dup[2], &uds_socket_name](int err_no) -> std::string {
+    const char err_msg_fmt[] = "failed creating parent unix uds %s socket for i/o to spawned program subcommand %s: %s";
+    return format2str(err_msg_fmt, uds_socket_name.c_str(), subcmd, strerror(err_no));
+  });
 
   sockaddr_un server_address;
   socklen_t address_length;
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  init_sockaddr(uds_socket_name, server_address, address_length);
 
   if (bind(read_fd_sp->fd, (const sockaddr*) &server_address, address_length) < 0) {
-    const char err_msg_fmt[] = "failed binding parent unix socket for i/o to spawned program subcommand %s: %s";
-    throw spawn_program_exception(format2str(err_msg_fmt, argv_dup[2], strerror(errno)));
+    const char err_msg_fmt[] = "failed binding parent unix uds %s socket for i/o to spawned program subcommand %s: %s";
+    throw bind_uds_socket_name_exception(format2str(err_msg_fmt, uds_socket_name.c_str(), argv_dup[2], strerror(errno)));
   }
-#else
-  int pipefd[] = { 0, 0 };
-  if (pipe(pipefd) == -1) {
-    const char * const err_msg_fmt = "failed creating pipe for i/o to spawned program: %s";
-    throw spawn_program_exception(format2str(err_msg_fmt, strerror(errno)));
-  }
-  const std::string pipe_optn{ format2str("-pipe=read:%d,write:%d", pipefd[0], pipefd[1]) };
-  argv_dup[1] = const_cast<char*>(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
-
-  fd_t  read_fd{ pipefd[0] };
-  fd_t write_fd{ pipefd[1] };
-  std::unique_ptr<fd_t, fd_cleanup_t>  read_fd_sp(&read_fd,  fd_cleanup);
-  std::unique_ptr<fd_t, fd_cleanup_t> write_fd_sp(&write_fd, fd_cleanup);
-#endif
 
   posix_spawnattr_t attr;
   auto rtn = posix_spawnattr_init(&attr);
@@ -225,11 +303,7 @@ static std::tuple<pid_t, int, std::string> spawn_program(int argc, char **argv, 
     throw spawn_program_exception(format2str(err_msg_fmt, rtn));
   }
 
-#if USE_UNIX_SOCKET
-  return std::make_tuple(pid, read_fd_sp.release()->fd, std::move(uds_socket_name));
-#else
-  return std::make_tuple(pid, read_fd_sp.release()->fd, std::string{});
-#endif
+  return std::make_tuple(pid, std::move(read_fd_sp), std::move(uds_socket_name));
 }
 
 static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char **argv, std::string& prog_path) {
@@ -250,124 +324,18 @@ static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char 
   auto rslt = spawn_program(argc, argv, prog_name, prog_path.c_str());
 
   pid_t const pid = std::get<0>(rslt);
-  fd_t read_fd{ std::get<1>(rslt) }; // spawn the program
-  std::unique_ptr<fd_t, fd_cleanup_t> read_fd_sp(&read_fd, fd_cleanup);
+  fd_wrapper_sp_t read_fd_sp{ std::move(std::get<1>(rslt)) }; // spawn the program
 
-#if USE_UNIX_SOCKET
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
 
-  sockaddr_un server_address;
-  socklen_t address_length;
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  auto rslt2 = obtain_response_stream(uds_socket_name, std::move(read_fd_sp));
+  pid_t const child_pid = std::get<0>(rslt2);
+  fd_wrapper_sp_t child_read_fd_sp{ std::move(std::get<1>(rslt2)) };
 
-  size_t bufsize = 0;
+  auto const flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
+  fcntl(child_read_fd_sp->fd, F_SETFL, flags & ~O_NONBLOCK);
 
-  auto bytes_received = recvfrom( read_fd_sp->fd,
-                                  &bufsize,
-                                  sizeof(bufsize),
-                                  0,
-                                  (sockaddr *) &server_address,
-                                  &address_length);
-  if (bytes_received < 0) {
-    const char err_msg_fmt[] = "%s() failed getting fifo pipe name size for spawned child program subcommand %s:\n%s";
-    throw spawn_program_exception(format2str(err_msg_fmt, "recvfrom", argv[1], strerror(errno)));
-  }
-  assert(bytes_received == (long) sizeof(bufsize));
-  assert(bufsize > 0);
-  printf("DEBUG: ***** spawned child program subcommand %s received fifo pipe name size: %lu *****\n", argv[1], bufsize);
-
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
-  auto buf = (char*) alloca(bufsize + 1);
-
-  bytes_received = recvfrom(read_fd_sp->fd,
-                            buf,
-                            bufsize,
-                            0,
-                            (sockaddr *) &server_address,
-                            &address_length);
-  if (bytes_received < 0) {
-    const char err_msg_fmt[] = "%s() failed getting fifo pipe name for spawned child program subcommand %s:\n%s";
-    throw spawn_program_exception(format2str(err_msg_fmt, "recvfrom", argv[1], strerror(errno)));
-  }
-  assert(bytes_received == (long) bufsize);
-  buf[bufsize] = '\0'; // null terminate the C string
-  printf("DEBUG: ***** spawned child program subcommand %s received fifo pipe name: *****\n\t\"%s\"\n", argv[1], buf);
-
-  std::string fifo_pipe_name{ buf };
-
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
-  int integer_buffer = 0;
-
-  bytes_received = recvfrom(read_fd_sp->fd,
-                            &integer_buffer,
-                            sizeof(integer_buffer),
-                            0,
-                            (sockaddr *) &server_address,
-                            &address_length);
-  if (bytes_received < 0) {
-    const char err_msg_fmt[] = "%s() failed getting process pid for spawned child program subcommand %s:\n%s";
-    throw spawn_program_exception(format2str(err_msg_fmt, "recvfrom", argv[1], strerror(errno)));
-  }
-  assert(bytes_received == (long) sizeof(integer_buffer));
-  assert(integer_buffer > 0);
-  printf("DEBUG: ***** spawned child program subcommand %s received process pid: %d *****\n", argv[1], integer_buffer);
-
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
-
-  msghdr child_msg;
-  memset(&child_msg, 0, sizeof(child_msg));
-  child_msg.msg_name = &server_address;
-  child_msg.msg_namelen = address_length;
-  struct {
-    cmsghdr cmsg;
-    int child_rd_fd; // will be the returned value from recvmsg() call
-  }
-      cmsg_payload;
-  child_msg.msg_control = &cmsg_payload; // make place for the ancillary message to be received
-  child_msg.msg_controllen = sizeof(cmsg_payload);
-
-  auto rc = recvmsg(read_fd_sp->fd, &child_msg, 0);
-  if (rc < 0) {
-    const char err_msg_fmt[] = "%s() failed getting i/o fd for spawned child program subcommand %s:\n%s";
-    throw spawn_program_exception(format2str(err_msg_fmt, "recvmsg", argv[1], strerror(errno)));
-  }
-  const cmsghdr* const cmsg = CMSG_FIRSTHDR(&child_msg);
-  assert(cmsg != nullptr);
-  assert(cmsg->cmsg_type == SCM_RIGHTS);
-  if (cmsg == nullptr || cmsg->cmsg_type != SCM_RIGHTS) {
-    const char *const err_msg_fmt = "no file descriptor returned from spawned child program subcommand %s";
-    throw spawn_program_exception(format2str(err_msg_fmt, argv[1]));
-  }
-  printf("DEBUG: ***** spawned child program subcommand %s received i/o fd: %d *****\n", argv[1], cmsg_payload.child_rd_fd);
-
-  fd_t child_read_fd{ cmsg_payload.child_rd_fd };
-  std::unique_ptr<fd_t, fd_cleanup_t> child_read_fd_sp(&child_read_fd, fd_cleanup);
-#else
-  int n_read = 0, n_writ = 0;
-
-  // get the FIFO named pipe for reading output from the spawned program child process
-  std::string fifo_pipe_name { [&n_read,&n_writ](const int fd) -> std::string {
-    std::stringstream ss;
-    char iobuf[256];
-    for(;;) {
-      const auto n = read(fd, iobuf, sizeof(iobuf));
-      if (n == -1) {
-        handle_fd_error(errno);
-      }
-      else if (n <= 0) {
-        break;
-      } else {
-        n_read += n;
-      }
-      ss.write(iobuf, n);
-      n_writ += n;
-    }
-    return ss.str();
-  }(read_fd_sp->fd) };
-
-  log(LL::DEBUG, "%s(): child process FIFO named pipe: '%s'\n\tfrom child process pipe: %d read, %d written",
-      __func__, uds_socket_name.c_str(), n_read, n_writ);
-#endif
+  std::string fifo_pipe_name{ std::move(uds_socket_name) };
 
   int status = 0;
   do {
@@ -381,73 +349,11 @@ static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char 
     }
   } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
-#if USE_UNIX_SOCKET
-  printf("DEBUG: ***** spawned launcher process (pid:%d) of child program subcommand %s completed *****\n", pid, argv[1]);
-#else
-  fd_t child_read_fd{ open_fifo_pipe(fifo_pipe_name.c_str(), O_RDONLY | O_NONBLOCK) };
-  std::unique_ptr<fd_t, fd_cleanup_t> child_read_fd_sp(&child_read_fd, fd_cleanup);
-#endif
+  log(LL::DEBUG, "%s(): ***** spawned launcher process (pid:%d) of child program subcommand %s completed *****\n",
+      __FUNCTION__, pid, argv[1]);
 
-  auto const get_child_process_pid = [&fifo_pipe_name](int const fd) -> pid_t {
-    static const char *const func_name = "get_child_process_pid";
-    int read_attempts = 30; // 30 x 100 ms = 3 secs
-    struct timespec tim = { 0, 100000000L }, tim2; // 100 ms
-    char iobuf[8];
-  readloop:
-    //log(LL::DEBUG, "%s() calling read(fd)", func_name);
-    auto n = read(fd, iobuf, sizeof(iobuf));
-    if (n == -1 || n == 0) {
-      switch(n = n == 0 ? EAGAIN : errno) {
-        case EAGAIN:
-          if (!termination_flag) {
-            if (read_attempts > 0) {
-              nanosleep(&tim, &tim2);
-              if (--read_attempts <= 0) {
-                // set poll timeout to 1.5 secs
-                tim.tv_sec  = 1;
-                tim.tv_nsec = 500000000L;
-              }
-              goto readloop;
-            }
-            nanosleep(&tim, &tim2);
-            goto readloop;
-          }
-        case EINTR: {
-          log(LL::DEBUG, "%s() throwing interrupted_exception", func_name);
-          std::string errmsg{"interrupted waiting to read child process pid"};
-          throw interrupted_exception(std::move(errmsg));
-        }
-        default:
-          handle_fd_error(static_cast<int>(n));
-          return 0;
-      }
-    } else  if (n != sizeof(iobuf)) {
-      throw spawn_program_exception("did not read expected amount of data for transmitted child process pid");
-    }
-    const char *const child_pid_str = strndupa(iobuf, sizeof(iobuf));
-    // make sure that the returned child process pid can be converted into an integer without error
-    errno = 0;
-    unsigned long int const rtn_pid = strtoul(child_pid_str, nullptr, 16);
-    if (errno != 0) {
-      // returned child pid is unexpectedly corrupt so throwing exception as a fatal error condition
-      const char err_msg_fmt[] = "invalid child process pid [%lu] returned on UDS socket \"%s\":\n\t%s";
-      throw spawn_program_exception(format2str(err_msg_fmt, rtn_pid, fifo_pipe_name.c_str(), strerror(errno)));
-    }
-    log(LL::DEBUG, "%s() returning child process pid:%lu", func_name, rtn_pid);
-    return static_cast<pid_t >(rtn_pid);
-  };
 
-  auto const flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
-  fcntl(child_read_fd_sp->fd, F_SETFL, flags | O_NONBLOCK);
-
-  pid_t const child_pid = get_child_process_pid(child_read_fd_sp->fd);
-
-#if USE_UNIX_SOCKET
-  fcntl(child_read_fd_sp->fd, F_SETFL, flags & ~O_NONBLOCK);
-  printf("DEBUG: ***** spawned child program subcommand %s pid: %d *****\n", argv[1], child_pid);
-#else
-  fcntl(child_read_fd_sp->fd, F_SETFL, flags);
-#endif
+  log(LL::DEBUG, "%s(): ***** spawned child program subcommand %s pid: %d *****\n", __FUNCTION__, argv[1], child_pid);
 
   // return pid, fd, and fifo pipe name to launched child process
   return std::make_tuple(child_pid, child_read_fd_sp.release()->fd, std::move(fifo_pipe_name));
@@ -594,8 +500,8 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
     return nullptr;
   }
 
-  fd_t child_read_fd{ fd };
-  std::unique_ptr<fd_t, fd_cleanup_t> child_read_fd_sp(&child_read_fd, fd_cleanup);
+  fd_wrapper_t child_read_fd{ fd };
+  fd_wrapper_sp_t child_read_fd_sp{ &child_read_fd, &fd_cleanup_no_delete };
 
   auto const find_class = [env,&prog_path] (const char *cls_name) -> jclass {
     jclass const found_cls = env->FindClass(cls_name);

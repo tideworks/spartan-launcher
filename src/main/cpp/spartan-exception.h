@@ -21,51 +21,58 @@ limitations under the License.
 
 #include <exception>
 #include <memory>
-#include <functional>
 #include <string>
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wreorder"
 class spartan_exception : public std::exception {
-  protected:
-    virtual void make_abstract() = 0;
-    std::unique_ptr<char, std::function<void(char*)>> _nm;
-    std::string _msg;
-    char* type_name(const char * const mangled_name);
-    static void free_nm(char *p);
-    spartan_exception(const char * const mangled_type_name, const char * const msg)
-      : _nm(type_name(mangled_type_name), std::move(free_nm)), _msg(msg) {}
-    spartan_exception(const char * const mangled_type_name, std::string &msg)
-      : _nm(type_name(mangled_type_name), std::move(free_nm)), _msg(std::move(msg)) {}
-  public:
-    explicit spartan_exception(const char * const msg) : spartan_exception(typeid(*this).name(), msg) {}
-    explicit spartan_exception(std::string&& msg) : spartan_exception(typeid(*this).name(), msg) {}
-    spartan_exception(const spartan_exception&) = delete;
-    spartan_exception& operator=(const spartan_exception&) = delete;
-    spartan_exception(spartan_exception&& a) noexcept : _nm(a._nm.release()), _msg(std::move(a._msg)) {}
-  spartan_exception& operator=(const spartan_exception&&) = delete;
-    virtual const char* name() const throw() { return _nm.get(); }
-    const char* what() const throw() override { return _msg.c_str(); }
-    ~spartan_exception() override = default;
+protected:
+  virtual void make_abstract() = 0;
+protected:
+  static void free_nm(char *p);
+  std::unique_ptr<char, decltype(&free_nm)> _nm{ nullptr, &free_nm };
+  std::string _msg;
+  char* type_name(const char * const mangled_name);
+  explicit spartan_exception(const char * const mangled_type_name, const char * const msg)
+    : _msg{ msg } { _nm.reset(type_name(mangled_type_name)); }
+  explicit spartan_exception(const char * const mangled_type_name, std::string &msg)
+    : _msg{ std::move(msg) } { _nm.reset(type_name(mangled_type_name)); }
+  spartan_exception() = default;
+public:
+  spartan_exception(const char * const msg) = delete;
+  spartan_exception(std::string &&) = delete;
+  spartan_exception(std::string const &) = delete;
+  spartan_exception(std::string &) = delete;
+  spartan_exception(spartan_exception const &) = delete;
+  spartan_exception& operator=(spartan_exception const &) = delete;
+  spartan_exception(spartan_exception &&) = delete;
+  spartan_exception& operator=(spartan_exception const &&) = delete;
+  ~spartan_exception() override = default;
+public:
+  virtual const char* name() const throw()  { return _nm.get(); }
+  const char* what() const throw() override { return _msg.c_str(); }
 };
 #pragma GCC diagnostic pop
 
 #define DECL_EXCEPTION(x) \
 class x##_exception : public spartan_exception {\
-  protected:\
-    void make_abstract() override {}\
-  public:\
-    explicit x##_exception(const char * const msg) : spartan_exception(typeid(*this).name(), msg) {}\
-    explicit x##_exception(std::string&& msg) : spartan_exception(typeid(*this).name(), msg) {}\
-    x##_exception(const x##_exception&) = delete;\
-    x##_exception& operator=(const x##_exception&) = delete;\
-    x##_exception(x##_exception&&) = default;\
-    x##_exception& operator=(x##_exception &&ex) noexcept {\
-      this->_nm  = std::move(ex._nm);\
-      this->_msg = std::move(ex._msg);\
-      return *this;\
-    }\
-    ~x##_exception() override = default;\
+protected:\
+  void make_abstract() override {}\
+public:\
+  x##_exception() = delete;\
+  explicit x##_exception(const char * const msg) : spartan_exception{ typeid(*this).name(), msg } {}\
+  explicit x##_exception(std::string &&msg) : spartan_exception{ typeid(*this).name(), msg } {}\
+  x##_exception(std::string const &) = delete;\
+  x##_exception(std::string &) = delete;\
+  x##_exception(x##_exception const &) = delete;\
+  x##_exception& operator=(x##_exception const &) = delete;\
+  x##_exception(x##_exception &&ex) noexcept : spartan_exception() { this->operator=(std::move(ex)); }\
+  x##_exception& operator=(x##_exception &&ex) noexcept {\
+    this->_nm  = std::move(ex._nm);\
+    this->_msg = std::move(ex._msg);\
+    return *this;\
+  }\
+  ~x##_exception() override = default;\
 };
 
 std::string get_unmangled_name(const char * const mangled_name);

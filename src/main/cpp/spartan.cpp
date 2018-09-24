@@ -33,8 +33,6 @@ limitations under the License.
 #include <algorithm>
 #include <cxxabi.h>
 #include <popt.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include "shm.h"
 #include "createjvm.h"
 #include "fifo-pipe.h"
@@ -47,6 +45,8 @@ limitations under the License.
 #include "StdOutCapture.h"
 #include "format2str.h"
 
+using namespace launch_program;
+
 using logger::log;
 using logger::LL;
 using logger::is_trace_level;
@@ -57,6 +57,8 @@ static const char SHUTDOWN_CMD[] = "--SHUTDOWN";
 static const char STATUS_CMD[] = "--STATUS";
 static const char CHILD_PID_NOTIFY_CMD[] = "--CHILD_PID_NOTIFY";
 static const char CHILD_PID_COMPLETION_NOTIFY_CMD[] = "--CHILD_PID_COMPLETION_NOTIFY";
+
+DECL_EXCEPTION(open_write_pipe)
 
 static volatile sig_atomic_t flag = 0;
 void set_exit_flag_true() {
@@ -95,13 +97,6 @@ const char * progname() { return s_progname.c_str(); }
 using processor_result_t = std::tuple<bool,int>;
 using send_mq_msg_cb_t = std::function<int (const char * const msg)>;
 using action_cb_t = std::function<int(sessionState& session, JavaVM * const jvm)>;
-struct fd_wrapper {
-  int fd;
-  std::string const name;
-  fd_wrapper(int fd) : fd{fd}, name{} {}
-  fd_wrapper(int fd, const char * const name) : fd{fd}, name{name} {}
-};
-using fd_wrapper_sp_t = std::unique_ptr<fd_wrapper, std::function<void(fd_wrapper *)>>;
 
 template<typename T>
 using defer_jobj_sp_t = std::unique_ptr<_jobject, T>;
@@ -109,18 +104,18 @@ using defer_jobj_sp_t = std::unique_ptr<_jobject, T>;
 template<typename T>
 using defer_jstr_sp_t = std::unique_ptr<_jstring, T>;
 
-#define USE_UNIX_SOCKET 1
-
-#if USE_UNIX_SOCKET
-static int return_spawned_child_state(std::string const &uds_socket_name, std::string const &fifo_pipe_name,
-                                      std::string const &cmd);
-#endif
-
-static int client_status_request(const char * const fifo_pipe_name, send_mq_msg_cb_t send_mq_msg_cb);
-static int stdout_echo_response_stream(const char * const fifo_pipe_name, const bool handle_child_pid = true);
+static int client_status_request(std::string const &fifo_pipe_name, fd_wrapper_sp_t &&socket_fd_sp,
+                                 send_mq_msg_cb_t send_mq_msg_cb);
+static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp);
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor, fd_wrapper_sp_t rsp_fd,
-                              const char *const rsp_pipename, int argc = 0, char **argv = nullptr,
+                              const char* const rsp_pipename, int argc = 0, char**argv = nullptr,
                               const sessionState *pss = nullptr);
+inline int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
+                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr)
+{
+  return invoke_java_method(jvmp, method_descriptor, fd_wrapper_sp_t{ nullptr, [](fd_wrapper_t*){} },
+                            std::string{}.c_str(), argc, argv, pss);
+}
 static int  supervisor(int argc, char **argv, sessionState& session);
 static void supervisor_child_processor_notify(const pid_t child_pid, const char * const command_line);
 static void supervisor_child_processor_completion_notify(const siginfo_t& info);
@@ -164,6 +159,9 @@ bool icompare(const std::string &a, const std::string &b) {
     return false;
   }
 }
+
+enum class Operation : short { NONE, SERVICE, INVOKED_COMMAND, STATUS, STOP, COMMAND };
+using OP = Operation;
 
 int main(int argc, char **argv) {
   s_parent_thrd_pid = getpid();
@@ -221,35 +219,63 @@ int main(int argc, char **argv) {
       return send_mq_msg::send_flattened_argv_mq_msg(argc, argv, fifo_pipe_name, queue_name, filter);
   };
 
-  // use this lambda to make a fifo named pipe prior to sending
-  // any mq message so as to prevent a race condition arising
-  // between the current process and the forked child process
-  // (i.e., averts any attempt to open the pipe before it exist)
-  static auto const make_fifo_named_pipe = []() -> std::string {
-    auto fifo_pipe_name = make_jlauncher_fifo_pipe_name(progname());
-    make_fifo_pipe(fifo_pipe_name.c_str());
-    return fifo_pipe_name;
-  };
-
   if (argc > 1) {
+    // there are command line arguments to iterate and parse
     try {
-      static const char* const cfg_file = "config.ini";
-      static const char* const pipe_optn = "pipe=";
-#if USE_UNIX_SOCKET
+      static const char cfg_file[] = "config.ini";
+      static const char srvc_optn[] = "service";
+      static const char pipe_optn[] = "pipe=";
+      static const char status_cmd[] = "status";
+      static const char stop_cmd[] = "stop";
+      std::string pipe_option{}, command{};
       std::string uds_socket_name{};
-#else
-      fd_wrapper pipe_write_fd{0};
-      fd_wrapper_sp_t pipe_write_fd_sp(nullptr, [](fd_wrapper *p) {
-        if (p != nullptr) {
-          close(p->fd);
-        }
-      });
-#endif
+      Operation operation = OP::NONE;
 
+      // Iterate through command line arguments and set the operation that needs to be performed.
+      // (The first encountered, recognized operation, is the one that is selected to be done;
+      //  subsequent options will be regarded as arguments to the recognized operation.)
       for(int i = 1; i < argc; i++) {
         if (*(argv[i]) == '-') {
-          const char * const opt = argv[i] + 1;
-          if (strcasecmp(opt, "service") == 0) {
+          const char * const optn = argv[i] + 1;
+          if (strcasecmp(optn, srvc_optn) == 0) {
+            if (operation == OP::NONE) {
+              operation = OP::SERVICE;
+            }
+          } else if (strncasecmp(optn, pipe_optn, strlen(pipe_optn)) == 0) {
+            if (operation == OP::NONE) {
+              operation = OP::INVOKED_COMMAND;
+              pipe_option = argv[i];
+            }
+          }
+        } else {
+          const char * const optn = argv[i];
+          if (strcasecmp(optn, status_cmd) == 0) {
+            if (operation == OP::NONE) {
+              operation = OP::STATUS;
+              command = status_cmd;
+            }
+          } else if (strcasecmp(optn, stop_cmd) == 0) {
+            if (operation == OP::NONE) {
+              operation = OP::STOP;
+              command = stop_cmd;
+            }
+          } else {
+            if (operation == OP::NONE) {
+              operation = OP::COMMAND;
+              command = optn;
+            } else if (command.empty()) {
+              command = optn;
+            }
+          }
+        }
+      }
+
+      // State machine for processing the operation that was determined in for-loop above
+      // (via having examined the raw command line arguments to determine which operation)
+      bool do_loop = false; /***** by default will make a one-shot-pass through switch statement *****/
+      do {
+        switch (operation) {
+          case OP::SERVICE: {
             log(LL::INFO, "started as a service");
             const std::string jvmlib_path = determine_jvmlib_path();
             sessionState session(cfg_file, jvmlib_path.c_str());
@@ -258,57 +284,54 @@ int main(int argc, char **argv) {
               exit_code = rtn_code;
             }
             break;
-          } else if (strncasecmp(opt, pipe_optn, strlen(pipe_optn)) == 0) {
-            std::string pipe_optn_str{argv[i]};
-#if USE_UNIX_SOCKET
-            auto delimiter = std::find(pipe_optn_str.begin(), pipe_optn_str.end(), '=');
-            delimiter++;
-            uds_socket_name = std::move(std::string(delimiter, pipe_optn_str.end()));
-#else
-            std::transform(pipe_optn_str.begin(), pipe_optn_str.end(), pipe_optn_str.begin(), ::tolower);
-            int rd_fd = 0, wr_fd = 0;
-            auto rtn = sscanf(pipe_optn_str.c_str(), "-pipe=read:%d,write:%d", &rd_fd, &wr_fd);
-            if (rtn != 2) {
-              log(LL::WARN, "failure scanning file descripters of pipe option:\n\t%s", argv[i]);
-            }
-            pipe_write_fd.fd = wr_fd;
-            pipe_write_fd_sp.reset(&pipe_write_fd);
-            close(rd_fd); // won't need to use the read end of the pipe so close it
-#endif
           }
-        } else {
-          const char * const opt = argv[i];
-          if (strcasecmp(opt, "stop") == 0) {
-            // issue a msessage to the parent supervisor that instructs
+          case OP::INVOKED_COMMAND: {
+            if (command.empty()) {
+              log(LL::ERR, "expected command to process but none specified so exiting");
+              exit_code = 1;
+            } else {
+              auto delimiter = std::find(pipe_option.begin(), pipe_option.end(), '=');
+              delimiter++;
+              uds_socket_name = std::move(std::string(delimiter, pipe_option.end()));
+              operation = OP::COMMAND;
+              do_loop = true; /***** loop through switch again to now process the subcommand *****/
+            }
+            break;
+          }
+          case OP::STATUS: { ;
+            // request a status as output to a response stream
+            auto rslt = bind_uds_socket_name(command.c_str());
+            exit_code = client_status_request(std::get<1>(rslt), std::move(std::get<0>(rslt)), send_supervisor_mq_msg);
+            break;
+          }
+          case OP::STOP: { ;
+            // issue a message to the parent supervisor that instructs
             // it to stop processing and do an orderly termination
             exit_code = send_launcher_mq_msg(STOP_CMD);
             break;
-          } else if (strcasecmp(opt, "status") == 0) {
-            // request a status as output to a response stream
-            exit_code = client_status_request(make_fifo_named_pipe().c_str(), send_supervisor_mq_msg);
-            break;
-          } else {
-            // process as either a child processor command or as a supervisor command
-            std::string cmd(opt);
-            using cmd_t = decltype(cmd);
-            std::transform(cmd.begin(), cmd.end(), cmd.begin(), ::tolower);
+          }
+          case OP::COMMAND: {
+            do_loop = false; /***** fall out of the loop after processing the subcommand *****/
+
+            using cmd_t = decltype(command);
+            std::transform(command.begin(), command.end(), command.begin(), ::tolower);
 
             sessionState shm_session;
             cmd_dsp::get_cmd_dispatch_info(shm_session);
             if (!shm_session.spartanLoggingLevel.empty()) {
-              const auto logging_level = logger::str_to_level(shm_session.spartanLoggingLevel.c_str());
+              auto const logging_level = logger::str_to_level(shm_session.spartanLoggingLevel.c_str());
               logger::set_level(logging_level);
             }
-            const auto cmds_set(cmd_dsp::get_child_processor_commands(shm_session));
+            auto const cmds_set(cmd_dsp::get_child_processor_commands(shm_session));
             using cmds_set_t = decltype(cmds_set);
             if (is_trace_level()) {
-              for (const auto &e: cmds_set) {
+              for (auto const &e: cmds_set) {
                 log(LL::TRACE, "set item: \"%s\"", e.c_str());
               }
             }
 
-            // obtain the appropriate mq queue name - is either the jlauncher queue or is the jsupervisor queue
-            auto const mq_queue_name = [](cmds_set_t const &cs, cmd_t const &c) -> const char * {
+            // Obtain the appropriate mq queue name - is either the jlauncher queue or is the jsupervisor queue
+            auto const mq_queue_name = [](cmds_set_t const &cs, cmd_t const &c) -> std::string {
               if (cs.count(c) > 0) {
                 log(LL::DEBUG, "running child processor command: %s", c.c_str());
                 return jlauncher_queue_name.c_str();
@@ -316,50 +339,53 @@ int main(int argc, char **argv) {
                 log(LL::DEBUG, "running supervisor command: %s", c.c_str());
                 return jsupervisor_queue_name.c_str();
               }
-            }(cmds_set, cmd);
+            }(cmds_set, command);
 
             // All other command line options ("option_name ...") will
-            // be assumed to be a command that writes a result back to
-            // an output stream, so a fifo named pipe name is provided
-            // as the first argument in the message sent followed by
+            // be assumed to be a subcommand that writes a result back to
+            // an output stream, so a unix datagram bind name is provided
+            // as the first argument in the message sent, followed by
             // the rest of the command line; will filter out the option
-            // '-pipe=read:%d,write:%d' if it was present.
-            const auto fifo_pipe_name = make_fifo_named_pipe();
-            exit_code = send_flattened_argv_msg(fifo_pipe_name.c_str(), mq_queue_name,
-                                                [](int &_argc_ref, char *_argv[]) -> void {
-              const auto len = strlen(pipe_optn);
-              for(int n = 0; n < _argc_ref; n++) {
-                auto argv_item = _argv[n];
-                if (*argv_item == '-' && strncasecmp(++argv_item, pipe_optn, len) == 0) {
-                  for(int j = n; j < _argc_ref; j++) {
-                    _argv[j] = _argv[j + 1];
-                  }
-                  _argc_ref--;
-                  return;
-                }
-              }
-            });
+            // '-pipe=%s' if it was present.
+            fd_wrapper_sp_t read_fd_sp{ nullptr, [](fd_wrapper_t *) {} };
+            std::string fifo_pipe_name{};
+            if (uds_socket_name.empty()) {
+              auto rslt = bind_uds_socket_name(command.c_str());
+              read_fd_sp = std::move(std::get<0>(rslt));
+              fifo_pipe_name = std::move(std::get<1>(rslt));
+            } else {
+              fifo_pipe_name = uds_socket_name;
+            }
+            exit_code = send_flattened_argv_msg(fifo_pipe_name.c_str(), mq_queue_name.c_str(),
+                                          [](int &_argc_ref, char *_argv[]) -> void {
+                                            const auto len = strlen(pipe_optn);
+                                            for(int n = 0; n < _argc_ref; n++) {
+                                              auto argv_item = _argv[n];
+                                              if (*argv_item == '-' && strncasecmp(++argv_item, pipe_optn, len) == 0) {
+                                                for(int j = n; j < _argc_ref; j++) {
+                                                  _argv[j] = _argv[j + 1];
+                                                }
+                                                _argc_ref--;
+                                                return;
+                                              }
+                                            }
+                                          });
             // command line was posted as message to be processed, now
             // proceed to handle the response output stream appropriately
             if (exit_code == EXIT_SUCCESS) {
-#if USE_UNIX_SOCKET
-              if (!uds_socket_name.empty()) {
-                exit_code = return_spawned_child_state(uds_socket_name, fifo_pipe_name, cmd);
-#else
-              if (pipe_write_fd_sp) {
-                const auto fd = pipe_write_fd_sp.get()->fd;
-                auto n = write(fd, fifo_pipe_name.c_str(), fifo_pipe_name.size());
-                pipe_write_fd_sp.reset(nullptr);
-                exit_code = n == (decltype(n)) fifo_pipe_name.size() ? EXIT_SUCCESS : EXIT_FAILURE;
-#endif
-              } else {
-                exit_code = stdout_echo_response_stream(fifo_pipe_name.c_str());
+              if (uds_socket_name.empty()) {
+                exit_code = stdout_echo_response_stream(fifo_pipe_name, std::move(read_fd_sp));
               }
             }
             break;
-         }
+          }
+          default: {
+            log(LL::WARN, "no recognized command line operation to process so exiting");
+            exit_code = 1;
+            break;
+          }
         }
-      }
+      } while(do_loop);
     } catch(const spartan_exception& e) {
       log(LL::ERR, "process %d terminating due to:\n\t%s: %s", getpid(), e.name(), e.what());
       exit_code = 1;
@@ -380,109 +406,62 @@ int main(int argc, char **argv) {
   _exit(exit_code); // do not change this to simple return - avoids side effect with Java JVM (per g++ 7.2.1)
 }
 
-#if USE_UNIX_SOCKET
-static int return_spawned_child_state(std::string const &uds_socket_name, std::string const &fifo_pipe_name,
-                                      std::string const &cmd)
-{
-  fd_wrapper pipe_rd_fd_wrpr{ open_fifo_pipe(fifo_pipe_name.c_str(), O_RDONLY | O_NONBLOCK) };
-  auto const fd_cleanup = [](fd_wrapper *p) {
-    if (p != nullptr && p->fd != -1) {
-      close(p->fd);
-      p->fd = -1;
-    }
-  };
-  std::unique_ptr<fd_wrapper, decltype(fd_cleanup)> pipe_rd_fd_sp(&pipe_rd_fd_wrpr, fd_cleanup);
+static fd_wrapper_sp_t open_write_fifo_pipe(const char *const fifo_pipe_name, int &rc) {
+  static const char* const func_name = __FUNCTION__;
+  rc = EXIT_SUCCESS;
 
-  fd_wrapper socket_fd_wrpr{ socket(AF_UNIX, SOCK_DGRAM, 0) };
-  if (socket_fd_wrpr.fd < 0) {
-    const char err_msg_fmt[] = "%s() failed creating datagram for spawned child program subcommand %s";
-    std::string const err_msg{ format2str(err_msg_fmt, "socket", cmd.c_str()) };
-    perror(err_msg.c_str());
-    return EXIT_FAILURE;
+  std::string const uds_socket_name{ fifo_pipe_name };
+
+  int line_nbr = 0;
+  auto const handle_create_uds_socket_error = [&uds_socket_name, &line_nbr](int err_no) -> std::string {
+    const char err_msg_fmt[] = "%d: %s() -> create_uds_socket(): failed creating uds socket for use with name %s:\n\t%s";
+    return format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), strerror(err_no));
+  };
+  line_nbr = __LINE__ + 1;
+  auto socket_fd_sp = create_uds_socket(std::move(handle_create_uds_socket_error));
+
+  enum PIPES : short { READ = 0, WRITE = 1 };
+
+  int pipes[2] { -1, -1 };
+  auto rtn = pipe(pipes); line_nbr = __LINE__;
+  if (rtn == -1) {
+    const char err_msg_fmt[] = "%d: %s() -> pipe(): failed creating pipe file descriptor pair:\n\t%s";
+    auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, strerror(errno));
+    throw open_write_pipe_exception{ std::move(err_msg) };
   }
-  std::unique_ptr<fd_wrapper, decltype(fd_cleanup)> socket_fd_sp(&socket_fd_wrpr, fd_cleanup);
-
-  auto const init_sockaddr = [](const char *const uds_sock_name, size_t name_len, sockaddr_un &addr,
-                                socklen_t &addr_len)
-  {
-    memset(&addr, 0, sizeof(sockaddr_un));
-    addr.sun_family = AF_UNIX;
-    auto const path_buf_end = sizeof(addr.sun_path) - 1;
-    strncpy(addr.sun_path, uds_sock_name, path_buf_end);
-    addr.sun_path[path_buf_end] = '\0';
-    addr.sun_path[0] = '\0';
-    addr_len = sizeof(sockaddr_un) - (sizeof(addr.sun_path) - name_len);
-  };
+  fd_wrapper_t rd_pipe{ pipes[PIPES::READ] };
+  fd_wrapper_sp_t rd_pipe_sp{ &rd_pipe, &fd_cleanup_no_delete };
+  fd_wrapper_sp_t wr_pipe_sp{ new fd_wrapper_t{ pipes[PIPES::WRITE], uds_socket_name.c_str() }, &fd_cleanup_with_delete };
 
   sockaddr_un server_address;
   socklen_t address_length;
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  init_sockaddr(uds_socket_name, server_address, address_length);
 
-  auto buf = strdupa(fifo_pipe_name.c_str());
-  size_t bufsize = fifo_pipe_name.size();
+  pid_buffer_t pid_buffer{ wr_pipe_sp->pid, 1 };
 
   auto bytes_sent = sendto(socket_fd_sp->fd,
-                           &bufsize,
-                           sizeof(bufsize),
+                           &pid_buffer,
+                           sizeof(pid_buffer),
                            0,
                            (sockaddr*) &server_address,
-                           address_length);
+                           address_length); line_nbr = __LINE__;
   if (bytes_sent < 0) {
-    const char err_msg_fmt[] = "%s() failed sending fifo pipe name size for spawned child program subcommand %s";
-    std::string const err_msg{ format2str(err_msg_fmt, "sendto", cmd.c_str()) };
-    perror(err_msg.c_str());
-    return EXIT_FAILURE;
+    const char err_msg_fmt[] = "%d: %s() -> sendto(): failed sending process pid{%d} datagram via named socket %s:\n\t%s";
+    auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, pid_buffer.pid, uds_socket_name.c_str(), strerror(errno));
+    throw open_write_pipe_exception{ std::move(err_msg) };
   }
-  assert(bytes_sent == (long) sizeof(bufsize));
-  printf("DEBUG: ***** spawned child program subcommand %s sent fifo pipe name size: %lu *****\n",
-         cmd.c_str(), bufsize);
+  assert(bytes_sent == (long) sizeof(pid_buffer));
 
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  log(LL::DEBUG, "%s(): ***** sent process pid{%d} datagram via named socket %s *****\n",
+      func_name, pid_buffer.pid, uds_socket_name.c_str());
 
-  bytes_sent = sendto( socket_fd_sp->fd,
-                       buf,
-                       bufsize,
-                       0,
-                       (sockaddr*) &server_address,
-                       address_length);
-  if (bytes_sent < 0) {
-    const char err_msg_fmt[] = "%s() failed sending fifo pipe name for spawned child program subcommand %s";
-    std::string const err_msg{ format2str(err_msg_fmt, "sendto", cmd.c_str()) };
-    perror(err_msg.c_str());
-    return EXIT_FAILURE;
-  }
-  assert(bytes_sent == (long) bufsize);
-  printf("DEBUG: ***** spawned child program subcommand %s sent fifo pipe name: *****\n\t\"%s\"\n",
-         cmd.c_str(), fifo_pipe_name.c_str());
-
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
-  int integer_buffer = 1;
-
-  bytes_sent = sendto( socket_fd_sp->fd,
-                       &integer_buffer,
-                       sizeof(integer_buffer),
-                       0,
-                       (sockaddr*) &server_address,
-                       address_length);
-  if (bytes_sent < 0) {
-    const char err_msg_fmt[] = "%s() failed sending process pid for spawned child program subcommand %s";
-    std::string const err_msg{ format2str(err_msg_fmt, "sendto", cmd.c_str()) };
-    perror(err_msg.c_str());
-    return EXIT_FAILURE;
-  }
-  assert(bytes_sent == (long) sizeof(integer_buffer));
-
-  init_sockaddr(uds_socket_name.c_str(), uds_socket_name.size(), server_address, address_length);
+  init_sockaddr(uds_socket_name, server_address, address_length);
 
   msghdr parent_msg;
   memset(&parent_msg, 0, sizeof(parent_msg));
   parent_msg.msg_name = &server_address;
   parent_msg.msg_namelen = address_length;
-  struct {
-    cmsghdr cmsg;
-    int const pipe_rd_fd;
-  }
-      cmsg_payload{ { 0, SOL_SOCKET, SCM_RIGHTS }, pipe_rd_fd_sp->fd };
+  pipe_fds_buffer_t cmsg_payload{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rd_pipe_sp->fd } };
   parent_msg.msg_control = &cmsg_payload;
   parent_msg.msg_controllen = sizeof(cmsg_payload); // necessary for CMSG_FIRSTHDR to return the correct value
 
@@ -490,73 +469,44 @@ static int return_spawned_child_state(std::string const &uds_socket_name, std::s
   assert(cmsg != nullptr);
   cmsg->cmsg_len = sizeof(cmsg_payload);
 
-  if (sendmsg(socket_fd_sp->fd, &parent_msg, 0) < 0) {
-    const char err_msg_fmt[] = "%s() failed sending i/o fd for spawned child program subcommand %s";
-    std::string const err_msg{ format2str(err_msg_fmt, "sendmsg", cmd.c_str()) };
-    perror(err_msg.c_str());
-    return EXIT_FAILURE;
+  bytes_sent = sendmsg(socket_fd_sp->fd, &parent_msg, 0); line_nbr = __LINE__;
+  if (bytes_sent < 0) {
+    const char err_msg_fmt[] = "%d: %s() -> sendmsg(): failed sending i/o fd{%d} datagram via named socket %s:\n\t%s";
+    auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, rd_pipe_sp->fd, uds_socket_name.c_str(), strerror(errno));
+    throw open_write_pipe_exception{ std::move(err_msg) };
   }
-  printf("DEBUG: ***** spawned child program subcommand %s sent i/o fd: %d *****\n",
-         cmd.c_str(), cmsg_payload.pipe_rd_fd);
+  log(LL::DEBUG, "%s(): ***** sent i/o pipe read fd{%d} datagram via named socket %s *****\n",
+      func_name, cmsg_payload.pipe_fds[0], uds_socket_name.c_str());
 
-// pipe_rd_fd_sp.release(); // pipe fd has been transmitted to other (parent) process so don't close it
-  return EXIT_SUCCESS;
-}
-#endif
-
-static fd_wrapper_sp_t open_write_fifo_pipe(const char *const fifo_pipe_name, int &rc) {
-  rc = EXIT_SUCCESS;
-  int fd;
-  try {
-    fd = open_fifo_pipe(fifo_pipe_name, O_WRONLY);
-  }
-  catch (const open_fifo_pipe_exception& e) {
-    log(LL::ERR, "FIFO write pipe failure:\n\t%s: %s", e.name(), e.what());
-    rc = EXIT_FAILURE;
-    return fd_wrapper_sp_t();
-  }
-  fd_wrapper_sp_t fd_sp(new fd_wrapper { fd, fifo_pipe_name }, [](fd_wrapper *file_desc) {
-    if (file_desc != nullptr) {
-      try {
-        close_fifo_pipe(file_desc->fd, file_desc->name.c_str());
-        unlink(file_desc->name.c_str());
-      }
-      catch (const close_fifo_pipe_exception& e) {
-        log(LL::ERR, "on FIFO write pipe:\n\t%s: %s", e.name(), e.what());
-      }
-      delete file_desc;
-    }
-  });
-  return fd_sp;
+  return wr_pipe_sp; // returning i/o pipe write fd
 }
 
 // Handles --STATUS request message as supervisor process; FIFO pipe handle
 // is opened for write and status result is written to the pipe and closed
-static void supervisor_status_response( std::string fifo_pipe_name_str, JavaVM * const jvmp,
-                                        methodDescriptor method_descriptor) {
-  const char *const fifo_pipe_name = fifo_pipe_name_str.c_str();
-  log(LL::DEBUG, "%s(): open FIFO pipe \"%s\" for writing", __func__, fifo_pipe_name);
-
+static void supervisor_status_response(std::string fifo_pipe_name_str, JavaVM * const jvmp, methodDescriptor meth_desc) {
   int rc;
-  auto fd_sp(open_write_fifo_pipe(fifo_pipe_name, rc));
-  if (rc == EXIT_SUCCESS) {
-    rc = invoke_java_method(jvmp, &method_descriptor, std::move(fd_sp), fifo_pipe_name);
-  }
+  const char* const uds_socket_name = fifo_pipe_name_str.c_str();
+  log(LL::DEBUG, "%s(): open unix-datagram-socket %s for conveying pipe fd for writing", __func__, uds_socket_name);
 
+  auto fd_sp = open_write_fifo_pipe(uds_socket_name, rc);
+  if (rc == EXIT_SUCCESS) {
+    rc = invoke_java_method(jvmp, &meth_desc, std::move(fd_sp), uds_socket_name);
+  }
   log(LL::DEBUG, "%s() returning %s", __func__, rc == EXIT_SUCCESS ? "EXIT_SUCCESS" : "EXIT_FAILURE");
 }
 
 // Issues -STATUS request command to parent supervisor - result is written
 // to FIFO pipe, which is written to stdout by requester process
-static int client_status_request(const char * const fifo_pipe_name, send_mq_msg_cb_t send_mq_msg_cb) {
+static int client_status_request(std::string const &fifo_pipe_name, fd_wrapper_sp_t &&socket_fd_sp,
+                                 send_mq_msg_cb_t send_mq_msg_cb)
+{
   int strbuf_size = 256;
   char *strbuf = (char*) alloca(strbuf_size);
 
   int n = strbuf_size;
   do_msg_fmt: {
-    n = snprintf(strbuf, (size_t) n, "%s %s", STATUS_CMD, fifo_pipe_name);
+    n = snprintf(strbuf, (size_t) n, "%s %s", STATUS_CMD, fifo_pipe_name.c_str());
     if (n <= 0) {
-      unlink(fifo_pipe_name);
       log(LL::ERR, "failed synthesizing %s command string", STATUS_CMD);
       return EXIT_FAILURE;
     }
@@ -566,69 +516,24 @@ static int client_status_request(const char * const fifo_pipe_name, send_mq_msg_
     }
   }
 
-  const auto rtn = send_mq_msg_cb(strbuf);
+  auto const rtn = send_mq_msg_cb(strbuf);
 
-  return rtn == EXIT_SUCCESS ? stdout_echo_response_stream(fifo_pipe_name, false) : rtn;
+  return rtn == EXIT_SUCCESS ? stdout_echo_response_stream(fifo_pipe_name, std::move(socket_fd_sp)) : rtn;
 }
 
-static int stdout_echo_response_stream(const char * const fifo_pipe_name, const bool handle_child_pid) {
-  log(LL::DEBUG, "%s(): open FIFO pipe \"%s\" for reading", __func__, fifo_pipe_name);
+static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp) {
+  auto rslt = obtain_response_stream(uds_socket_name, std::move(read_fd_sp));
+  fd_wrapper_sp_t fd_sp{ std::move(std::get<1>(rslt)) };
 
-  int fd;
-  try {
-    fd = open_fifo_pipe(fifo_pipe_name, O_RDONLY);
-  }
-  catch (const open_fifo_pipe_exception& e) {
-    log(LL::ERR, "FIFO read pipe failure:\n\t%s: %s", e.name(), e.what());
-    return EXIT_FAILURE;
-  }
-
-  int rtn1 = EXIT_FAILURE;
-  fd_wrapper wrp = { fd, fifo_pipe_name };
-  fd_wrapper_sp_t fd_sp(&wrp, [&rtn1](fd_wrapper *file_desc) {
-    rtn1 = EXIT_FAILURE;
-    if (file_desc != nullptr) {
-      try {
-        close_fifo_pipe(file_desc->fd, file_desc->name.c_str());
-        unlink(file_desc->name.c_str());
-        rtn1 = EXIT_SUCCESS;
-      }
-      catch (const close_fifo_pipe_exception& e) {
-        log(LL::ERR, "on FIFO read pipe:\n\t%s: %s", e.name(), e.what());
-      }
-    }
-  });
-
-  auto const handle_fd_error = [fifo_pipe_name](int err) {
-    log(LL::ERR, "failure reading FIFO read pipe \"%s\":\n\t%s", fifo_pipe_name, strerror(err));
+  auto const handle_fd_error = [fd = fd_sp->fd, &uds_socket_name](int err_no) {
+    log(LL::ERR, "failure reading pipe fd{%d} via uds socket %s:\n\t%s", fd, uds_socket_name.c_str(), strerror(err_no));
   };
-
-  // if a child process was forked, then the pipe returns its pid as an 8 byte string hex-encoded integer
-  if (handle_child_pid) {
-    char iobuf[8];
-    const auto n = read(fd_sp->fd, iobuf, sizeof(iobuf));
-    if (n == -1 || n != sizeof(iobuf)) {
-      handle_fd_error(errno);
-      return EXIT_FAILURE;
-    }
-    const char * const child_pid_str = strndupa(iobuf, sizeof(iobuf));
-    // make sure that the returned child process pid can be converted into an integer without error
-    errno = 0;
-    const unsigned long int pid = strtoul(child_pid_str, nullptr, 16);
-    if (errno != 0) {
-      // returned child pid is unexpectedly corrupt so exiting as a fatal error condition
-      log(LL::ERR, "invalid child process pid [%lu] returned on FIFO read pipe \"%s\":\n\t%s",
-          pid, fifo_pipe_name, strerror(errno));
-      return EXIT_FAILURE;
-    }
-    log(LL::DEBUG, "%s(): forked child process (pid): %lu", __func__, pid);
-  }
 
   unsigned long long n_read = 0, n_writ = 0;
 
   // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
-  // - reads from fd device input until it is closed (or error)
-  auto rtn2 = [&n_read, &n_writ, &handle_fd_error](int in_fd, FILE *out_stream) -> int {
+  // - reads from file descriptor input until it is closed (or error)
+  auto rtn = [&n_read, &n_writ, &handle_fd_error](int in_fd, FILE *out_stream) -> int {
     char iobuf[512];
     for (; ;) {
       const auto n = read(in_fd, iobuf, sizeof(iobuf));
@@ -642,7 +547,7 @@ static int stdout_echo_response_stream(const char * const fifo_pipe_name, const 
       } else {
         n_read += n;
       }
-      const auto nw = fwrite(iobuf, 1, n, out_stream);
+      const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
       if (nw > 0) {
         n_writ += nw;
       }
@@ -651,13 +556,13 @@ static int stdout_echo_response_stream(const char * const fifo_pipe_name, const 
       }
     }
     return EXIT_SUCCESS;
-  }(fd_sp->fd, stdout);
+  }(fd_sp->fd, stdout); // will echo read pipe data to stdout
 
-  log(LL::DEBUG, "%s(): %Lu read, %Lu written", __func__, n_read, n_writ);
+  log(LL::DEBUG, "%s() -> %Lu read, %Lu written", __FUNCTION__, n_read, n_writ);
 
-  fd_sp.reset(nullptr); // explicitly invoke fd cleanup so can get value set in rtn1 to return
+  fd_sp.reset(nullptr); // explicitly invoke response stream fd cleanup
 
-  return rtn1 != EXIT_SUCCESS || rtn2 != EXIT_SUCCESS ? EXIT_FAILURE : EXIT_SUCCESS;
+  return rtn != EXIT_SUCCESS ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 
 inline JNIEnv* jni_attach_thread(JavaVM * const jvmp) {
@@ -814,10 +719,10 @@ static int invoke_java_method(JavaVM * const jvmp, const methodDescriptorBase *m
 
       const auto which_method = method_descriptor->which_method();
       if (which_method == WM::GET_CMD_DISPATCH_INFO) {
-        jclass const cls = env->FindClass(class_name);
-        if (cls == nullptr) throw 3;
+        jclass const jcls = env->FindClass(class_name);
+        if (jcls == nullptr) throw 3;
 
-        jmethodID const get_cmd_dispatch_info = env->GetStaticMethodID(cls, method_name, method_descriptor->desc_str());
+        jmethodID const get_cmd_dispatch_info = env->GetStaticMethodID(jcls, method_name, method_descriptor->desc_str());
         if (get_cmd_dispatch_info == nullptr) throw 4;
 
         sessionState ss;
@@ -827,11 +732,11 @@ static int invoke_java_method(JavaVM * const jvmp, const methodDescriptorBase *m
         }
 
         log(LL::DEBUG, "%s() invoking static method \"%s\"", __func__, fullMethodName);
-        auto const ser_cmd_dispatch_info = env->CallStaticObjectMethod(cls, get_cmd_dispatch_info);
+        auto const ser_cmd_dispatch_info = env->CallStaticObjectMethod(jcls, get_cmd_dispatch_info);
         was_exception_raised = env->ExceptionCheck();
 
         if (!was_exception_raised) {
-          cmd_dsp::CmdDispatchInfoProcessor processCDI(env, class_name, method_name, cls, ss);
+          cmd_dsp::CmdDispatchInfoProcessor processCDI(env, class_name, method_name, jcls, ss);
           auto pshm = processCDI.process_initial_cmd_dispatch_info(reinterpret_cast<jbyteArray>(ser_cmd_dispatch_info));
           spShmAlloctr.reset(pshm);
         }
@@ -865,7 +770,7 @@ static int invoke_java_method(JavaVM * const jvmp, const methodDescriptorBase *m
             log(LL::DEBUG, "%s() prepare to invoke method taking response stream argument...", __func__);
 
             // lambda that creates a Java FifoPipeOutputStream object instance and returns it
-            auto const create_fifo_pipe_outputstream = [&,env,rsp_pipename]() -> jobject {
+            auto const create_fifo_pipe_outputstream = [&,env]() -> jobject {
               static const char * const fdesc_cls_name = "java/io/FileDescriptor";
               auto const cls_fdesc = env->FindClass(fdesc_cls_name);
               if (cls_fdesc == nullptr) {
@@ -894,7 +799,7 @@ static int invoke_java_method(JavaVM * const jvmp, const methodDescriptorBase *m
                 throw 4;
               }
 
-              static const char * const fifo_pipe_strm_cls_name = "FifoPipeOutputStream";
+              static const char * const fifo_pipe_strm_cls_name = "java/io/FileOutputStream";
               auto const cls_fifo_pipe_strm = env->FindClass(fifo_pipe_strm_cls_name);
               if (cls_fifo_pipe_strm == nullptr) {
                 class_name = fifo_pipe_strm_cls_name;
@@ -902,17 +807,11 @@ static int invoke_java_method(JavaVM * const jvmp, const methodDescriptorBase *m
               }
 
               auto const ctor_fifo_pipe_strm = env->GetMethodID(cls_fifo_pipe_strm, ctor_name,
-                                                                "(Ljava/io/FileDescriptor;Ljava/lang/String;)V");
+                                                                "(Ljava/io/FileDescriptor;)V");
               if (ctor_fifo_pipe_strm == nullptr) {
                 class_name = fifo_pipe_strm_cls_name;
                 method_name = ctor_name;
                 throw 4;
-              }
-
-              defer_jstr_t spUtf_str(env->NewStringUTF(rsp_pipename), defer_jstr);
-              if (!spUtf_str) {
-                class_name = "java/lang/String{\"response fifo_pipe_name\"}";
-                throw 5;
               }
 
               // construct a new FileDescriptor
@@ -928,8 +827,8 @@ static int invoke_java_method(JavaVM * const jvmp, const methodDescriptorBase *m
               if (field_fd == nullptr) throw -1;
               env->SetIntField(spFdesc.get(), field_fd, rsp_fd.get()->fd);
 
-              defer_jobj_t spObj_fifo_pipe_strm(env->NewObject(cls_fifo_pipe_strm, ctor_fifo_pipe_strm, spFdesc.get(),
-                                                               spUtf_str.get()), defer_jobj);
+              defer_jobj_t spObj_fifo_pipe_strm(env->NewObject(cls_fifo_pipe_strm, ctor_fifo_pipe_strm, spFdesc.get()),
+                                                defer_jobj);
               if (!spObj_fifo_pipe_strm) {
                 class_name = fifo_pipe_strm_cls_name;
                 throw 5;
@@ -1159,9 +1058,7 @@ static int supervisor(int argc, char **argv, sessionState& session) {
                                           "spartan/CommandDispatchInfo/obtainSerializedSysPropertiesAndAnnotationInfo",
                                           "()[B",
                                           true, WM::GET_CMD_DISPATCH_INFO);
-          auto rc = invoke_java_method(jvm, &obtainSerializedAnnotationInfo,
-                                       fd_wrapper_sp_t(nullptr, [](fd_wrapper *p) {}),
-                                       nullptr, argc, argv, &session_param);
+          auto rc = invoke_java_method(jvm, &obtainSerializedAnnotationInfo, argc, argv, &session_param);
           std::unique_ptr<shm::ShmAllocator, shmAllocatorCleanup_t> sp_shm_alloc = std::move(spShmAlloctr);
           if (rc != EXIT_SUCCESS) {
             prom_rref.set_value(); // Send notification to waiting caller thread to proceed
@@ -1185,9 +1082,7 @@ static int supervisor(int argc, char **argv, sessionState& session) {
 
           prom_rref.set_value(); // Send notification to waiting caller thread to proceed
 
-          return invoke_java_method(jvm, &shm_session_tmp.spartanMainEntryPoint,
-                                    fd_wrapper_sp_t(nullptr, [](fd_wrapper *p) {}),
-                                    nullptr, argc, argv);
+          return invoke_java_method(jvm, &shm_session_tmp.spartanMainEntryPoint, argc, argv);
         };
 
         jvm_exit = invoke_child_process_action(session, "", action);
@@ -1253,7 +1148,7 @@ try_again:
   // state variables for the C++11 msg work queue - the msg will be the
   // command line args of a forked child process Java method invocation
   // or a Java method invocation on the supervisor
-  static std::mutex m;
+//  static std::mutex m;
   static std::condition_variable cv;
   static std::timed_mutex qm;
   static std::condition_variable_any qcv;
@@ -1310,9 +1205,9 @@ try_again:
       static const char * const delim = " ";
       char *save = nullptr;
       strtok_r(const_cast<char*>(msg_dup), delim, &save);
-      std::string cmd(strtok_r(nullptr, delim, &save));
-      cmd.erase(std::remove(cmd.begin(), cmd.end(), '"'), cmd.end());
-      return cmd;
+      std::string cmd_str(strtok_r(nullptr, delim, &save));
+      cmd_str.erase(std::remove(cmd_str.begin(), cmd_str.end(), '"'), cmd_str.end());
+      return cmd_str;
     }(msg);
 
     // does an async fork to produce a child worker process
@@ -1337,17 +1232,17 @@ try_again:
     } else {
       mqd_sp.release(); // don't want a forked child process to unlink the mq queue
 
-      sessionState shm_session;
-      cmd_dsp::get_cmd_dispatch_info(shm_session);
-      shm_session.libjvm_sp = std::move(session.libjvm_sp);
+      sessionState shm_session_st;
+      cmd_dsp::get_cmd_dispatch_info(shm_session_st);
+      shm_session_st.libjvm_sp = std::move(session.libjvm_sp);
 
-      auto pMethDesc = &shm_session.spartanChildProcessorEntryPoint; // default child processor command entry point
+      auto pMethDesc = &shm_session_st.spartanChildProcessorEntryPoint; // default child processor command entry point
 
-      if (shm_session.spSpartanChildProcessorCommands) { // check for matching annotated child command method entry
-        log(LL::TRACE, "@@@@ pid(%d): retrieved shm_session to invoke child process command: %s\n"
+      if (shm_session_st.spSpartanChildProcessorCommands) { // check for matching annotated child command method entry
+        log(LL::TRACE, "@@@@ pid(%d): retrieved shm_session_st to invoke child process command: %s\n"
                        "\tchild cmd vec size: %lu",
-            getpid(), cmd.c_str(), shm_session.spSpartanChildProcessorCommands->size());
-        for (auto &methDesc : *shm_session.spSpartanChildProcessorCommands) {
+            getpid(), cmd.c_str(), shm_session_st.spSpartanChildProcessorCommands->size());
+        for (auto &methDesc : *shm_session_st.spSpartanChildProcessorCommands) {
           if (icompare(methDesc.cmd_str(), cmd)) {
             pMethDesc = &methDesc;
             break;
@@ -1358,20 +1253,20 @@ try_again:
       auto const jvm_override_optns = pMethDesc != nullptr ? pMethDesc->jvm_optns_str() : "";
 
       auto const action = [argc, argv, pMethDesc, &msg_str](sessionState &session_param, JavaVM *const jvm) -> int {
-        auto const msg = msg_str.c_str();
+        auto const cmsg = msg_str.c_str();
         if (pMethDesc != nullptr && !pMethDesc->empty()) {
           // call the standard entry point for child commands
-          return invoke_child_processor_command(argc, argv, msg, jvm, *pMethDesc);
+          return invoke_child_processor_command(argc, argv, cmsg, jvm, *pMethDesc);
         } else {
-          log(LL::ERR, "%s(): no Java method defined to handle command line:\n\t'%s'", func_name, msg);
+          log(LL::ERR, "%s(): no Java method defined to handle command line:\n\t'%s'", func_name, cmsg);
           return EXIT_FAILURE;
         }
       };
 
       // invoke the processing logic of the forked child process and return its exit code
-      const auto exit_code = invoke_child_process_action(shm_session, jvm_override_optns, action);
+      const auto exit_rtn_code = invoke_child_process_action(shm_session_st, jvm_override_optns, action);
       log(LL::DEBUG, "<< %s() - exiting process pid(%d)", func_name, getpid());
-      exit(exit_code);
+      exit(exit_rtn_code);
     }
   };
 
@@ -1435,7 +1330,7 @@ try_again:
           log(LL::ERR, "invoke_java_supervisor_command() did not complete command %s successfully", cmd_str.c_str());
         }
       };
-      int ec = EXIT_SUCCESS;
+      int ec;
       if (cmd_token != nullptr && shm_session.spSpartanSupervisorCommands) {
         log(LL::TRACE, "@@@@ pid(%d): use shm_session to invoke supervisor command: %s\n\tsupervisor cmd vec size: %lu",
                getpid(), cmd_str.c_str(), shm_session.spSpartanSupervisorCommands->size());
@@ -1551,9 +1446,7 @@ try_again:
 
     if (strcmp(msg_dup, SHUTDOWN_CMD) == 0) {
       jvm_shutting_down = true;
-      const auto ec = invoke_java_method(shm_session.jvm_sp.get(), &shm_session.spartanSupervisorShutdownEntryPoint,
-                                         fd_wrapper_sp_t(nullptr, [](fd_wrapper *p) {}),
-                                         nullptr); // no fifo named pipe in use
+      const auto ec = invoke_java_method(shm_session.jvm_sp.get(), &shm_session.spartanSupervisorShutdownEntryPoint);
       if (ec != EXIT_SUCCESS) {
         log(LL::ERR, "%s() did not complete command %s successfully", func_name, msg_dup);
       }
@@ -1666,19 +1559,15 @@ static void supervisor_child_processor_completion_notify(const siginfo_t& info) 
 static int invoke_java_child_processor_notify(const char *const child_pid, const char *const command_line,
                                               JavaVM *const jvmp, methodDescriptor method_descriptor)
 {
-  char *argv[3]{const_cast<char *>(child_pid), const_cast<char *>(command_line), nullptr};
-  return invoke_java_method(jvmp, &method_descriptor,
-                            fd_wrapper_sp_t(nullptr, [](fd_wrapper *p) { }), nullptr, // no fifo named pipe in use
-                            2, argv); // argc, argv parameters
+  std::array<char*, 3> argv = { const_cast<char*>(child_pid), const_cast<char*>(command_line), nullptr };
+  return invoke_java_method(jvmp, &method_descriptor, argv.size() - 1, argv.data()); // argc, argv parameters
 }
 
 static int invoke_java_child_processor_completion_notify(const char *const child_pid, JavaVM *const jvmp,
                                                          methodDescriptor method_descriptor)
 {
-  char *argv[2]{const_cast<char *>(child_pid), nullptr};
-  return invoke_java_method(jvmp, &method_descriptor,
-                            fd_wrapper_sp_t(nullptr, [](fd_wrapper *p) { }), nullptr, // no fifo named pipe in use
-                            1, argv); // argc, argv parameters
+  std::array<char*, 2> argv = { const_cast<char*>(child_pid), nullptr };
+  return invoke_java_method(jvmp, &method_descriptor, argv.size() - 1, argv.data()); // argc, argv parameters
 }
 
 static int invoke_child_process_action(sessionState &session_mut, const char *jvm_override_optns, action_cb_t action) {
@@ -1709,33 +1598,32 @@ static int invoke_child_process_action(sessionState &session_mut, const char *jv
   return exit_code;
 }
 
-using raii_argv_sp_t = std::unique_ptr<const char *, std::function<void(const char **)>>;
+using raii_argv_sp_t = std::unique_ptr<const char*, std::function<void(const char**)>>;
 
-static raii_argv_sp_t parse_cmd_line(const char *const cmd_line, const char *const desc, int &argc_cmd_ln, int &rc) {
-  static const char *const func_name = __func__;
+static raii_argv_sp_t parse_cmd_line(const char *const cmd_line, const char *const desc, int &argc_cmd_line, int &rc) {
+  static const char *const func_name = __FUNCTION__;
   rc = EXIT_SUCCESS;
-  argc_cmd_ln = 0;
-  const char **argv_cmd_ln = nullptr;
-  auto rtn = poptParseArgvString(cmd_line, &argc_cmd_ln, &argv_cmd_ln);
+  argc_cmd_line = 0;
+  const char**argv_cmd_line = nullptr;
+  auto rtn = poptParseArgvString(cmd_line, &argc_cmd_line, &argv_cmd_line);
   if (is_trace_level()) {
-    log(LL::TRACE, "%s() %s %d rtn: %d, argc: %d", __func__, desc, getpid(), rtn, argc_cmd_ln);
+    log(LL::TRACE, "%s() %s %d rtn: %d, argc: %d", func_name, desc, getpid(), rtn, argc_cmd_line);
     if (rtn == 0) {
-      for (int i = 0; i < argc_cmd_ln; i++) {
-        printf("\targv[%d]: %s\n", i, argv_cmd_ln[i]);
+      for (int i = 0; i < argc_cmd_line; i++) {
+        printf("\targv[%d]: %s\n", i, argv_cmd_line[i]);
       }
     }
   }
   if (rtn != 0) {
-    const char *const errmsg = poptStrerror(rtn);
-    log(LL::ERR, "%s() %s %d Failed parsing command line:\n\t%s", __func__, desc, getpid(), errmsg);
+    const char* const errmsg = poptStrerror(rtn);
+    log(LL::ERR, "%s() %s %d Failed parsing command line:\n\t%s", func_name, desc, getpid(), errmsg);
     rc = EXIT_FAILURE;
   }
-  const auto curr_pid = getpid();
-  raii_argv_sp_t raii_argv_sp(argv_cmd_ln, [curr_pid](const char **p) {
-    log(LL::TRACE, "%s() %d Freeing argv storage of command line", func_name, curr_pid);
+  auto const curr_pid = getpid();
+  return raii_argv_sp_t{ argv_cmd_line, [curr_pid](const char**p) {
+    log(LL::TRACE, "%s() pid:%d, freeing argv storage of command line", func_name, curr_pid);
     std::free(p);
-  });
-  return raii_argv_sp;
+  }};
 }
 
 static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const msg_arg,
@@ -1746,29 +1634,21 @@ static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const 
   log(LL::INFO, "%s() %s %d processing:\n\t\'%s\'", func_name, desc, pid, msg_arg);
 
   int rc;
-  int argc_cmd_ln;
+  int argc_cmd_line;
 
-  auto raii_argv_sp(parse_cmd_line(msg_arg, desc, argc_cmd_ln, rc));
+  auto raii_argv_sp = parse_cmd_line(msg_arg, desc, argc_cmd_line, rc);
   if (rc == EXIT_SUCCESS) {
-    auto const argv_cmd_ln = raii_argv_sp.get();
-    if (argc_cmd_ln <= 1) {
-      log(LL::ERR, "%s() %s %d Invalid command line - insufficient arguments:\n\t'%s'",
+    auto const argv_cmd_line = raii_argv_sp.get();
+    if (argc_cmd_line <= 1) {
+      log(LL::ERR, "%s() %s %d unexpected error - invalid command line - insufficient arguments:\n\t'%s'",
           func_name, desc, getpid(), msg_arg);
       rc = EXIT_FAILURE;
     } else {
-      auto const fifo_pipe_name = argv_cmd_ln[0]; // by convention first arg must be fifo named pipe name
-      auto fd_sp(open_write_fifo_pipe(fifo_pipe_name, rc));
+      auto const uds_socket_name = argv_cmd_line[0]; // by convention first arg must be unix datagram name
+      auto fd_sp = open_write_fifo_pipe(uds_socket_name, rc);
       if (rc == EXIT_SUCCESS) {
-        char buf[16];
-        const long unsigned int curr_pid = (long unsigned int) getpid();
-        const int n = snprintf(buf, sizeof(buf), "%08lX", curr_pid);
-        if (write(fd_sp->fd, buf, (size_t) n) == -1) {
-          log(LL::ERR, "writing %s pid to FIFO write pipe:\n\t%s", desc, strerror(errno));
-          rc = EXIT_FAILURE;
-        } else {
-          rc = invoke_java_method(jvmp, &method_descriptor, std::move(fd_sp), fifo_pipe_name,
-                                  argc_cmd_ln, const_cast<char **>(argv_cmd_ln));
-        }
+        rc = invoke_java_method(jvmp, &method_descriptor, std::move(fd_sp), uds_socket_name,
+                                argc_cmd_line, const_cast<char**>(argv_cmd_line));
       }
     }
   }

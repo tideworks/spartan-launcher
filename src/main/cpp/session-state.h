@@ -19,7 +19,6 @@ limitations under the License.
 #ifndef __SESSION_STATE_H__
 #define __SESSION_STATE_H__
 
-#include <functional>
 #include <iostream>
 #include <vector>
 #include "so-export.h"
@@ -38,11 +37,6 @@ typedef JNIEnv_ JNIEnv;
 namespace cmd_dsp {
   class CmdDispatchInfoProcessor;
 }
-
-// type declarations
-using libjvm_close_h_CB_t = std::function<void (void*)>;
-using JavaVM_cleanup_CB_t = std::function<void (JavaVM*)>;
-using JNIEnv_cleanup_CB_t = std::function<void (JNIEnv*)>;
 
 enum class WhichMethod : short { NONE = 0, MAIN, GET_STATUS, SUPERVISOR_SHUTDOWN, CHILD_NOTIFY, CHILD_COMPLETION_NOTIFY,
                                  SUPERVISOR_DO_CMD, CHILD_DO_CMD, GET_CMD_DISPATCH_INFO };
@@ -153,9 +147,9 @@ public:
   std::shared_ptr<std::vector<std::string>> spSerializedSystemProperties;
   std::string spartanLoggingLevel;
   std::string jvmlib_path;
-  std::unique_ptr<void,   libjvm_close_h_CB_t> libjvm_sp { nullptr, close_libjvm };
-  std::unique_ptr<JavaVM, JavaVM_cleanup_CB_t> jvm_sp    { nullptr, cleanup_jvm };
-  std::unique_ptr<JNIEnv, JNIEnv_cleanup_CB_t> env_sp    { nullptr, cleanup_jnienv };
+  std::unique_ptr<void,   decltype(&close_libjvm)>    libjvm_sp { nullptr, &close_libjvm };
+  std::unique_ptr<JavaVM, decltype(&cleanup_jvm)>     jvm_sp    { nullptr, &cleanup_jvm };
+  std::unique_ptr<JNIEnv, decltype(&cleanup_jnienv)>  env_sp    { nullptr, &cleanup_jnienv };
 
   sessionState() = default;
   sessionState(const char * const cfg_file, const char * const jvmlib_path);
