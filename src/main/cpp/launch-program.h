@@ -60,7 +60,8 @@ namespace launch_program {
   SO_EXPORT void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len);
   SO_EXPORT fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg);
   SO_EXPORT std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd);
-  SO_EXPORT std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp);
+  SO_EXPORT std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
+                                                                      fd_wrapper_sp_t socket_read_fd_sp);
 }
 
 #endif //__LAUNCH_PROGRAM_H__

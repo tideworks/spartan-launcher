@@ -137,7 +137,7 @@ namespace launch_program {
   }
 
   SO_EXPORT std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
-                                                                      fd_wrapper_sp_t read_fd_sp)
+                                                                      fd_wrapper_sp_t socket_read_fd_sp)
   {
     static const char* const func_name = __FUNCTION__;
 
@@ -149,7 +149,7 @@ namespace launch_program {
     memset(&pid_buffer, 0, sizeof(pid_buffer));
 
     int line_nbr = __LINE__ + 1;
-    auto bytes_received = recvfrom( read_fd_sp->fd,
+    auto bytes_received = recvfrom( socket_read_fd_sp->fd,
                                     &pid_buffer,
                                     sizeof(pid_buffer),
                                     0,
@@ -180,7 +180,7 @@ namespace launch_program {
     client_recv_msg.msg_control = &cmsg_payload;
     client_recv_msg.msg_controllen = sizeof(cmsg_payload); // necessary for CMSG_FIRSTHDR to return the correct value
 
-    auto rc = recvmsg(read_fd_sp->fd, &client_recv_msg, 0); line_nbr = __LINE__;
+    auto rc = recvmsg(socket_read_fd_sp->fd, &client_recv_msg, 0); line_nbr = __LINE__;
     if (rc < 0) {
       const char err_msg_fmt[] = "%d: %s() -> recvmsg(): no read pipe fd returned from uds %s socket:\n\t%s";
       auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), strerror(errno));
@@ -247,7 +247,8 @@ static std::string find_program_path(const char * const prog, const char * const
   throw find_program_path_exception(format2str(err_msg_fmt, prog, path_var_name));
 }
 
-static std::tuple<pid_t, fd_wrapper_sp_t, std::string> spawn_program(int argc, char **argv, const char * const prog_file,
+static std::tuple<pid_t, fd_wrapper_sp_t, std::string> spawn_program(int argc, char **argv,
+                                                                     const char * const prog_file,
                                                                      const char * const prog_path)
 {
   auto const argc_dup = argc + 1; // bump up by one for added -pipe= option
@@ -306,7 +307,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> spawn_program(int argc, c
   return std::make_tuple(pid, std::move(read_fd_sp), std::move(uds_socket_name));
 }
 
-static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char **argv, std::string& prog_path) {
+static std::tuple<pid_t, fd_wrapper_sp_t> launch_program_helper(int argc, char **argv, std::string& prog_path) {
   const char *const prog_name = strdupa(prog_path.c_str()); // starts out as just program name, so copy this to retain
   if (strchr(prog_name, '/') == nullptr && strchr(prog_name, '\\') == nullptr) {
     prog_path = find_program_path(prog_name, "PATH"); // determine fully qualified path to the program
@@ -321,21 +322,17 @@ static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char 
     }
   }
 
-  auto rslt = spawn_program(argc, argv, prog_name, prog_path.c_str());
-
+  auto rslt = spawn_program(argc, argv, prog_name, prog_path.c_str()); // spawn the temporary launcher process
   pid_t const pid = std::get<0>(rslt);
-  fd_wrapper_sp_t read_fd_sp{ std::move(std::get<1>(rslt)) }; // spawn the program
-
+  fd_wrapper_sp_t socket_read_fd_sp{ std::move(std::get<1>(rslt)) };
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
 
-  auto rslt2 = obtain_response_stream(uds_socket_name, std::move(read_fd_sp));
+  auto rslt2 = obtain_response_stream(uds_socket_name, std::move(socket_read_fd_sp));
   pid_t const child_pid = std::get<0>(rslt2);
   fd_wrapper_sp_t child_read_fd_sp{ std::move(std::get<1>(rslt2)) };
 
   auto const flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
   fcntl(child_read_fd_sp->fd, F_SETFL, flags & ~O_NONBLOCK);
-
-  std::string fifo_pipe_name{ std::move(uds_socket_name) };
 
   int status = 0;
   do {
@@ -352,11 +349,10 @@ static std::tuple<pid_t, int, std::string> launch_program_helper(int argc, char 
   log(LL::DEBUG, "%s(): ***** spawned launcher process (pid:%d) of child program subcommand %s completed *****\n",
       __FUNCTION__, pid, argv[1]);
 
-
   log(LL::DEBUG, "%s(): ***** spawned child program subcommand %s pid: %d *****\n", __FUNCTION__, argv[1], child_pid);
 
-  // return pid, fd, and fifo pipe name to launched child process
-  return std::make_tuple(child_pid, child_read_fd_sp.release()->fd, std::move(fifo_pipe_name));
+  // return pid, fd, and uds socket name per launched child process
+  return std::make_tuple(child_pid, std::move(child_read_fd_sp));
 }
 
 static const char * const invoke_child_cmd_errmsg_fmt = "unknown child command: %s";
@@ -474,15 +470,13 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
     c_strs[i]      = env->GetStringUTFChars(argv_str.j_str, &argv_str.isCopy);
   }
 
-  pid_t child_pid = 0;
-  int fd = 0;
   std::string prog_path(c_strs[0]);
-  std::string fifo_pipe_name;
+  pid_t child_pid = 0;
+  fd_wrapper_sp_t child_read_fd_sp{ nullptr, &fd_cleanup_with_delete };
   try {
     auto rslt = launch_program_helper(argc + 1, (char **) c_strs, prog_path);
     child_pid = std::get<0>(rslt);
-    fd = {std::get<1>(rslt)};
-    fifo_pipe_name = std::move(std::get<2>(rslt));
+    child_read_fd_sp = std::move(std::get<1>(rslt));
   } catch(const interrupted_exception& ex) {
     jclass const ex_cls = env->FindClass("java/lang/InterruptedException");
     assert(ex_cls != nullptr);
@@ -500,10 +494,7 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
     return nullptr;
   }
 
-  fd_wrapper_t child_read_fd{ fd };
-  fd_wrapper_sp_t child_read_fd_sp{ &child_read_fd, &fd_cleanup_no_delete };
-
-  auto const find_class = [env,&prog_path] (const char *cls_name) -> jclass {
+  auto const find_class = [env,&prog_path](const char *cls_name) -> jclass {
     jclass const found_cls = env->FindClass(cls_name);
     const char * const exception_cls = "java/lang/ClassNotFoundException";
     const char * const err_msg_fmt = spawn_failed_errmsg3_fmt;
@@ -535,13 +526,12 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
   auto const fdesc_ctor = get_method(fdesc_cls, ctor_name, "()V");
   if (fdesc_ctor == nullptr) return nullptr;
 
-  // FifoPipeInputStream class and ctor
-  auto const fifo_pipe_strm_cls = find_class("FifoPipeInputStream");
-  if (fifo_pipe_strm_cls == nullptr) return nullptr;
+  // java.io.FileInputStream class and ctor
+  auto const file_input_strm_cls = find_class("java/io/FileInputStream");
+  if (file_input_strm_cls == nullptr) return nullptr;
 
-  auto const fifo_pipe_strm_ctor = get_method(fifo_pipe_strm_cls, ctor_name,
-                                              "(Ljava/io/FileDescriptor;Ljava/lang/String;)V");
-  if (fifo_pipe_strm_ctor == nullptr) return nullptr;
+  auto const file_input_strm_ctor = get_method(file_input_strm_cls, ctor_name, "(Ljava/io/FileDescriptor;)V");
+  if (file_input_strm_ctor == nullptr) return nullptr;
 
   // Spartan.InvokeResponse class and ctor
   auto const invoke_rsp_cls = find_class("spartan/Spartan$InvokeResponse");
@@ -550,23 +540,17 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
   auto const invoke_rsp_ctor = get_method(invoke_rsp_cls, ctor_name, "(ILjava/io/InputStream;)V");
   if (invoke_rsp_ctor == nullptr) return nullptr;
 
-  // create a Java UTF string of the fifo pipe name
-  auto const utf_str = env->NewStringUTF(fifo_pipe_name.c_str());
-  if (!check_new_obj(utf_str, "fifo pipe name UTF string")) return nullptr;
-
   // construct a new FileDescriptor
   auto const fdesc = env->NewObject(fdesc_cls, fdesc_ctor);
-  if (!check_new_obj(fdesc, "FileDescriptor for fifo pipe fd")) return nullptr;
+  if (!check_new_obj(fdesc, "FileDescriptor for input pipe fd")) return nullptr;
 
   struct {
-    jstring const utf_str;
     jobject const fdesc;
   }
-      args_wrpr{ utf_str, fdesc };
+      args_wrpr{ fdesc };
   using args_wrpr_t = decltype(args_wrpr);
   auto const deref_jobjs = [env](args_wrpr_t *p) {
     if (p != nullptr) {
-      env->DeleteLocalRef(p->utf_str);
       env->DeleteLocalRef(p->fdesc);
     }
   };
@@ -577,15 +561,15 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
   if (field_id == nullptr) return nullptr;
   env->SetIntField(fdesc, field_id, child_read_fd_sp->fd);
 
-  // construct a new FifoPipeInputStream
-  auto const fifo_pipe_strm_obj = env->NewObject(fifo_pipe_strm_cls, fifo_pipe_strm_ctor, fdesc, utf_str);
-  if (!check_new_obj(fifo_pipe_strm_obj, "FifoPipeInputStream per the fifo pipe fd")) return nullptr;
+  // construct a new java.io.FileInputStream
+  auto const file_input_strm_obj = env->NewObject(file_input_strm_cls, file_input_strm_ctor, fdesc);
+  if (!check_new_obj(file_input_strm_obj, "FileInputStream per the input pipe fd")) return nullptr;
 
   // construct a new Spartan.InvokeResponse and populate object with return results
-  auto const invoke_rsp_obj = env->NewObject(invoke_rsp_cls, invoke_rsp_ctor, child_pid, fifo_pipe_strm_obj);
+  auto const invoke_rsp_obj = env->NewObject(invoke_rsp_cls, invoke_rsp_ctor, child_pid, file_input_strm_obj);
   if (!check_new_obj(invoke_rsp_obj, "Spartan.InvokeResponse as result of spawned program operation")) return nullptr;
 
-  child_read_fd_sp.release(); // make sure RAII smart pointer releases the fifo pipe fd before returning
+  child_read_fd_sp.release(); // make sure RAII smart pointer releases the input pipe fd before returning
   return invoke_rsp_obj;
 }
 
