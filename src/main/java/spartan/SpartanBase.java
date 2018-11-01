@@ -60,7 +60,7 @@ public class SpartanBase implements Spartan {
       this.commandLine = commandLine;
       timeStamp = LocalDateTime.now();
     }
-    public Integer  getPid() { return pid; }
+    public Integer getPid() { return pid; }
     public String toString() {
       return format("%s pid:%d '%s'", timeStamp, pid, commandLine);
     }
