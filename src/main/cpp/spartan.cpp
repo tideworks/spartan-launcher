@@ -404,6 +404,12 @@ int main(int argc, char **argv) {
   _exit(exit_code); // do not change this to simple return - avoids side effect with Java JVM (per g++ 7.2.1)
 }
 
+extern "C" {
+  SO_EXPORT int exp_main(int argc, char **argv) {
+    return main(argc, argv);
+  }
+}
+
 static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cstr, int &rc) {
   static const char* const func_name = __FUNCTION__;
   rc = EXIT_SUCCESS;

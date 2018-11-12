@@ -28,7 +28,6 @@ limitations under the License.
 #include <unistd.h>
 #include <pwd.h>
 #include <sys/syscall.h>
-#include <spawn.h>
 #include <cxxabi.h>
 #include <algorithm>
 #include "session-state.h"
@@ -47,10 +46,8 @@ DECL_EXCEPTION(find_program_path)
 DECL_EXCEPTION(create_uds_socket)
 DECL_EXCEPTION(bind_uds_socket_name)
 DECL_EXCEPTION(obtain_rsp_stream)
-DECL_EXCEPTION(spawn_program)
+DECL_EXCEPTION(fork)
 DECL_EXCEPTION(interrupted)
-
-extern char **environ;
 
 static volatile bool termination_flag = false;
 
@@ -247,15 +244,16 @@ static std::string find_program_path(const char * const prog, const char * const
   throw find_program_path_exception(format2str(err_msg_fmt, prog, path_var_name));
 }
 
-static std::tuple<pid_t, fd_wrapper_sp_t, std::string> spawn_program(int argc, char **argv,
-                                                                     const char * const prog_file,
-                                                                     const char * const prog_path)
-{
+extern "C" {
+  SO_EXPORT int exp_main(int argc, char **argv);
+}
+
+static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(int argc, char **argv, const char * const prog_path) {
   auto const argc_dup = argc + 1; // bump up by one for added -pipe= option
-  char**const argv_dup = (char**) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
+  char **const argv_dup = (char **) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
   argv_dup[0] = strdupa(prog_path); // file path of program to be spawned
   argv_dup[1] = nullptr; // command line option conveys pipe file descriptors to spawned program
-  for(int i = 2, j = 1; j < argc; i++, j++) {
+  for (int i = 2, j = 1; j < argc; i++, j++) {
     argv_dup[i] = argv[j];
   }
   argv_dup[argc_dup] = nullptr; // sentinel entry at end of argv array (and argv array convention)
@@ -273,35 +271,20 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> spawn_program(int argc, c
   socklen_t address_length;
   init_sockaddr(uds_socket_name, server_address, address_length);
 
-  if (bind(read_fd_sp->fd, (const sockaddr*) &server_address, address_length) < 0) {
+  if (bind(read_fd_sp->fd, (const sockaddr *) &server_address, address_length) < 0) {
     const char err_msg_fmt[] = "failed binding parent unix uds %s socket for i/o to spawned program subcommand %s: %s";
-    throw bind_uds_socket_name_exception(format2str(err_msg_fmt, uds_socket_name.c_str(), argv_dup[2], strerror(errno)));
+    throw bind_uds_socket_name_exception(
+        format2str(err_msg_fmt, uds_socket_name.c_str(), argv_dup[2], strerror(errno)));
   }
 
-  posix_spawnattr_t attr;
-  auto rtn = posix_spawnattr_init(&attr);
-  if (rtn != 0) {
-    const char err_msg_fmt[] = "could not initialize spawn attributes object: %d";
-    throw spawn_program_exception(format2str(err_msg_fmt, rtn));
-  }
-  auto const cleanup = [](posix_spawnattr_t *p) {
-    if (p != nullptr) {
-      posix_spawnattr_destroy(p);
-    }
-  };
-  std::unique_ptr<posix_spawnattr_t, decltype(cleanup)> attr_sp(&attr, cleanup);
-  posix_spawnattr_setflags(&attr, POSIX_SPAWN_USEVFORK);
-
-  log(LL::DEBUG, "number of spawned program %s command line args: %d", prog_file, argc_dup);
-  for (int i = 0; i < argc_dup; i++) {
-    log(LL::DEBUG, "'%s'", argv_dup[i]);
-  }
-
-  pid_t pid = 0;
-  rtn = posix_spawnp(&pid, prog_file, nullptr, &attr, argv_dup, environ);
-  if (rtn != 0) {
-    const char err_msg_fmt[] = "invocation of posix_spawnp() failed: %d";
-    throw spawn_program_exception(format2str(err_msg_fmt, rtn));
+  pid_t pid = fork();
+  if (pid == -1) {
+    const char err_msg_fmt[] = "pid(%d): fork() operation of launcher child process failed: %s";
+    throw fork_exception(format2str(err_msg_fmt, getpid(), strerror(errno)));
+  } else if (pid == 0) {
+    // is child process
+    auto rtn = exp_main(argc_dup, argv_dup); // execute spartan main() through direct call stack
+    exit(rtn);
   }
 
   return std::make_tuple(pid, std::move(read_fd_sp), std::move(uds_socket_name));
@@ -322,7 +305,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t> launch_program_helper(int argc, char *
     }
   }
 
-  auto rslt = spawn_program(argc, argv, prog_name, prog_path.c_str()); // spawn the temporary launcher process
+  auto rslt = fork2main(argc, argv, prog_path.c_str());
   pid_t const pid = std::get<0>(rslt);
   fd_wrapper_sp_t socket_read_fd_sp{ std::move(std::get<1>(rslt)) };
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
@@ -334,24 +317,26 @@ static std::tuple<pid_t, fd_wrapper_sp_t> launch_program_helper(int argc, char *
   auto const flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
   fcntl(child_read_fd_sp->fd, F_SETFL, flags & ~O_NONBLOCK);
 
-  int status = 0;
-  do {
-    if (waitpid(pid, &status, 0) == -1) {
-      const char err_msg_fmt[] = "failed waiting for launcher process (pid:%d): %s";
-      throw spawn_program_exception(format2str(err_msg_fmt, pid, strerror(errno)));
-    }
-    if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
-      const char err_msg_fmt[] = "interrupted waiting for launcher process (pid:%d)";
-      throw interrupted_exception(format2str(err_msg_fmt, pid));
-    }
-  } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+  {
+    int status = 0;
+    do {
+      if (waitpid(pid, &status, 0) == -1) {
+        const char err_msg_fmt[] = "failed waiting for forked launcher child process (pid:%d): %s";
+        throw fork_exception(format2str(err_msg_fmt, pid, strerror(errno)));
+      }
+      if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
+        const char err_msg_fmt[] = "interrupted waiting for forked launcher child process (pid:%d)";
+        throw interrupted_exception(format2str(err_msg_fmt, pid));
+      }
+    } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
-  log(LL::DEBUG, "%s(): ***** spawned launcher process (pid:%d) of child program subcommand %s completed *****\n",
-      __FUNCTION__, pid, argv[1]);
+    log(LL::DEBUG, "%s(): ***** forked launcher child process (pid:%d) of child program subcommand %s completed *****\n",
+        __FUNCTION__, pid, argv[1]);
+  }
 
   log(LL::DEBUG, "%s(): ***** spawned child program subcommand %s pid: %d *****\n", __FUNCTION__, argv[1], child_pid);
 
-  // return pid, fd, and uds socket name per launched child process
+  // return pid and fd per launched child process
   return std::make_tuple(child_pid, std::move(child_read_fd_sp));
 }
 
