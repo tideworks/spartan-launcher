@@ -19,9 +19,6 @@
   <!-- If a deploy goal is executed, define the repositories here -->
   <distributionManagement>
       <repository>
-          <snapshots>
-            <enabled>false</enabled>
-          </snapshots>
           <id>lwartifactory-releases</id>
           <name>Tideworks Release-Builds Artifactory Repository</name>
           <url>http://lwpeartifabld.tideworks.com:8080/artifactory/tideworks-builds/</url>
@@ -65,26 +62,6 @@
         <version>1.7</version>
         <executions>
           <execution>
-          <id>spartan-fifopipeoutputstream</id>
-          <phase>compile</phase>
-          <goals>
-              <goal>run</goal>
-          </goals>
-          <configuration>
-              <exportAntProperties>true</exportAntProperties>
-              <target>
-                 <property name="runtime_classpath" refid="maven.compile.classpath"/>
-                 <exec executable="javah">
-                     <arg value="-cp"/>
-                     <arg value="${runtime_classpath}"/>
-                     <arg value="-d"/>
-                     <arg value="${basedir}/src/main/cpp"/>
-                     <arg value="FifoPipeOutputStream"/>
-                 </exec>
-              </target>
-          </configuration>
-          </execution>
-          <execution>
           <id>spartan-launchprogram</id>
           <phase>compile</phase>
           <goals>
@@ -96,6 +73,7 @@
                  <property name="runtime_classpath" refid="maven.compile.classpath"/>
                  <exec executable="javah">
                      <arg value="-cp"/>
+                     <!--suppress MavenModelInspection -->
                      <arg value="${runtime_classpath}"/>
                      <arg value="-d"/>
                      <arg value="${basedir}/src/main/cpp"/>

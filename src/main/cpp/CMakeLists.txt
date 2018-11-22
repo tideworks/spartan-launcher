@@ -17,7 +17,7 @@ set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,'$ORIGIN/'")
 set(SOURCE_FILES spartan.cpp spartan-exception.cpp findfiles.cpp ini.cpp cfgparse.cpp
     createjvm.cpp shm.cpp memBufStream.cpp)
 
-set(LIB_SOURCE_FILES FifoPipeOutputStream.c fifo-pipe.cpp mq-queue.cpp send-mq-msg.cpp spartan-exception.cpp
+set(LIB_SOURCE_FILES fifo-pipe.cpp mq-queue.cpp send-mq-msg.cpp spartan-exception.cpp
     launch-program.cpp format2str.cpp log.cpp path-concat.cpp str-split.cpp session-state.cpp
     process-cmd-dispatch-info.cpp StdOutCapture.cpp)
 
