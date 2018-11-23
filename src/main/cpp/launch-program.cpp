@@ -290,8 +290,10 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(int argc, char 
   return std::make_tuple(pid, std::move(read_fd_sp), std::move(uds_socket_name));
 }
 
-static std::tuple<pid_t, fd_wrapper_sp_t> launch_program_helper(int argc, char **argv, std::string& prog_path) {
-  const char *const prog_name = strdupa(prog_path.c_str()); // starts out as just program name, so copy this to retain
+static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> launch_program_helper(
+    int argc, char **argv, std::string& prog_path, bool const isExtended)
+{
+  const char * const prog_name = strdupa(prog_path.c_str()); // starts out as just program name, so copy this to retain
   if (strchr(prog_name, '/') == nullptr && strchr(prog_name, '\\') == nullptr) {
     prog_path = find_program_path(prog_name, "PATH"); // determine fully qualified path to the program
   } else {
@@ -337,7 +339,9 @@ static std::tuple<pid_t, fd_wrapper_sp_t> launch_program_helper(int argc, char *
   log(LL::DEBUG, "%s(): ***** spawned child program subcommand %s pid: %d *****\n", __FUNCTION__, argv[1], child_pid);
 
   // return pid and fd per launched child process
-  return std::make_tuple(child_pid, std::move(child_read_fd_sp));
+  return std::make_tuple(child_pid, std::move(child_read_fd_sp),
+                         std::move(fd_wrapper_sp_t{ nullptr, &fd_cleanup_with_delete }),
+                         std::move(fd_wrapper_sp_t{ nullptr, &fd_cleanup_with_delete }));
 }
 
 static const char * const invoke_child_cmd_errmsg_fmt = "unknown child command: %s";
@@ -415,7 +419,9 @@ extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_log
  * Function:  invoke_spartan_subcommand
  * Signature: (Ljava/lang/String;[Ljava/lang/String;)Lspartan/Spartan/InvokeResponse;
  */
-static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, jstring progName, jobjectArray args) {
+static jobject JNICALL invoke_spartan_subcommand(
+    JNIEnv *env, jclass /*cls*/, jstring progName, jobjectArray args, bool const isExtended)
+{
   const jint argc = env->GetArrayLength(args);
   struct argv_str_t {
     jboolean  isCopy;
@@ -457,11 +463,17 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
 
   std::string prog_path(c_strs[0]);
   pid_t child_pid = 0;
-  fd_wrapper_sp_t child_read_fd_sp{ nullptr, &fd_cleanup_with_delete };
+  fd_wrapper_sp_t sp_child_rdr_fd{ nullptr, &fd_cleanup_with_delete };
+  fd_wrapper_sp_t sp_child_err_fd{ nullptr, &fd_cleanup_with_delete };
+  fd_wrapper_sp_t sp_child_wrt_fd{ nullptr, &fd_cleanup_with_delete };
   try {
-    auto rslt = launch_program_helper(argc + 1, (char **) c_strs, prog_path);
+    auto rslt = launch_program_helper(argc + 1, (char **) c_strs, prog_path, isExtended);
     child_pid = std::get<0>(rslt);
-    child_read_fd_sp = std::move(std::get<1>(rslt));
+    sp_child_rdr_fd = std::move(std::get<1>(rslt));
+    if (isExtended) {
+      sp_child_err_fd = std::move(std::get<2>(rslt));
+      sp_child_wrt_fd = std::move(std::get<3>(rslt));
+    }
   } catch(const interrupted_exception& ex) {
     jclass const ex_cls = env->FindClass("java/lang/InterruptedException");
     assert(ex_cls != nullptr);
@@ -504,12 +516,56 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
     return check_result(env, invkcmd_excptn_cls, obj, err_msg_fmt, prog_path.c_str(), desc);
   };
 
+  struct jobject_wrpr_t {
+    jobject _jobj;
+  };
+  jobject_wrpr_t rdr_fdesc_jobj_wrpr{nullptr};
+  jobject_wrpr_t err_fdesc_jobj_wrpr{nullptr};
+  jobject_wrpr_t wrt_fdesc_jobj_wrpr{nullptr};
+
+  auto const deref_jobj = [env](jobject_wrpr_t *p) {
+    if (p != nullptr && p->_jobj != nullptr) {
+      env->DeleteLocalRef(p->_jobj);
+      p->_jobj = nullptr;
+    }
+  };
+  std::unique_ptr<jobject_wrpr_t, decltype(deref_jobj)> sp_rdr_fdesc_wrpr(nullptr, deref_jobj);
+  std::unique_ptr<jobject_wrpr_t, decltype(deref_jobj)> sp_err_fdesc_wrpr(nullptr, deref_jobj);
+  std::unique_ptr<jobject_wrpr_t, decltype(deref_jobj)> sp_wrt_fdesc_wrpr(nullptr, deref_jobj);
+  using sp_jobj_wrpr_t = decltype(sp_rdr_fdesc_wrpr);
+
   // FileDescriptor class and ctor
   auto const fdesc_cls = find_class("java/io/FileDescriptor");
   if (fdesc_cls == nullptr) return nullptr;
 
   auto const fdesc_ctor = get_method(fdesc_cls, ctor_name, "()V");
   if (fdesc_ctor == nullptr) return nullptr;
+
+  auto const make_and_set_fdesc = [&check_new_obj, &get_fieldid, env, fdesc_cls, fdesc_ctor]
+      (const int fd, jobject_wrpr_t &jobj_wrpr, sp_jobj_wrpr_t &sp_jobj_wrpr) -> bool
+  {
+    // construct a new FileDescriptor
+    auto const fdesc = env->NewObject(fdesc_cls, fdesc_ctor);
+    if (!check_new_obj(fdesc, "FileDescriptor for stream pipe fd")) return false;
+
+    jobj_wrpr._jobj = fdesc;
+    sp_jobj_wrpr.reset(&jobj_wrpr);
+
+    // poke the "fd" field with the file descriptor
+    auto const field_id = get_fieldid(fdesc_cls, "fd", "I", "on file descriptor object");
+    if (field_id == nullptr) return false;
+
+    env->SetIntField(fdesc, field_id, fd);
+
+    return true;
+  };
+
+  if (!make_and_set_fdesc(sp_child_rdr_fd->fd, rdr_fdesc_jobj_wrpr, sp_rdr_fdesc_wrpr)) return nullptr;
+
+  if (isExtended) {
+    if (!make_and_set_fdesc(sp_child_err_fd->fd, err_fdesc_jobj_wrpr, sp_err_fdesc_wrpr)) return nullptr;
+    if (!make_and_set_fdesc(sp_child_wrt_fd->fd, wrt_fdesc_jobj_wrpr, sp_wrt_fdesc_wrpr)) return nullptr;
+  }
 
   // java.io.FileInputStream class and ctor
   auto const file_input_strm_cls = find_class("java/io/FileInputStream");
@@ -518,54 +574,65 @@ static jobject JNICALL invoke_spartan_subcommand(JNIEnv *env, jclass /*cls*/, js
   auto const file_input_strm_ctor = get_method(file_input_strm_cls, ctor_name, "(Ljava/io/FileDescriptor;)V");
   if (file_input_strm_ctor == nullptr) return nullptr;
 
-  // Spartan.InvokeResponse class and ctor
-  auto const invoke_rsp_cls = find_class("spartan/Spartan$InvokeResponse");
-  if (invoke_rsp_cls == nullptr) return nullptr;
-
-  auto const invoke_rsp_ctor = get_method(invoke_rsp_cls, ctor_name, "(ILjava/io/InputStream;)V");
-  if (invoke_rsp_ctor == nullptr) return nullptr;
-
-  // construct a new FileDescriptor
-  auto const fdesc = env->NewObject(fdesc_cls, fdesc_ctor);
-  if (!check_new_obj(fdesc, "FileDescriptor for input pipe fd")) return nullptr;
-
-  struct {
-    jobject const fdesc;
-  }
-      args_wrpr{ fdesc };
-  using args_wrpr_t = decltype(args_wrpr);
-  auto const deref_jobjs = [env](args_wrpr_t *p) {
-    if (p != nullptr) {
-      env->DeleteLocalRef(p->fdesc);
-    }
-  };
-  std::unique_ptr<args_wrpr_t, decltype(deref_jobjs)> sp_deref_jobjs(&args_wrpr, deref_jobjs);
-
-  // poke the "fd" field with the file descriptor
-  auto const field_id = get_fieldid(fdesc_cls, "fd", "I", "on file descriptor object");
-  if (field_id == nullptr) return nullptr;
-  env->SetIntField(fdesc, field_id, child_read_fd_sp->fd);
-
   // construct a new java.io.FileInputStream
-  auto const file_input_strm_obj = env->NewObject(file_input_strm_cls, file_input_strm_ctor, fdesc);
-  if (!check_new_obj(file_input_strm_obj, "FileInputStream per the input pipe fd")) return nullptr;
+  auto const input_strm_rdr_obj = env->NewObject(file_input_strm_cls, file_input_strm_ctor, sp_rdr_fdesc_wrpr->_jobj);
+  if (!check_new_obj(input_strm_rdr_obj, "FileInputStream per the data input pipe fd")) return nullptr;
 
-  // construct a new Spartan.InvokeResponse and populate object with return results
-  auto const invoke_rsp_obj = env->NewObject(invoke_rsp_cls, invoke_rsp_ctor, child_pid, file_input_strm_obj);
-  if (!check_new_obj(invoke_rsp_obj, "Spartan.InvokeResponse as result of spawned program operation")) return nullptr;
+  jobject invoke_rsp_obj = nullptr;
 
-  child_read_fd_sp.release(); // make sure RAII smart pointer releases the input pipe fd before returning
-  return invoke_rsp_obj;
+  if (!isExtended) {
+    // Spartan.InvokeResponse class and ctor
+    auto const invoke_rsp_cls = find_class("spartan/Spartan$InvokeResponse");
+    if (invoke_rsp_cls == nullptr) return nullptr;
+
+    auto const invoke_rsp_ctor = get_method(invoke_rsp_cls, ctor_name, "(ILjava/io/InputStream;)V");
+    if (invoke_rsp_ctor == nullptr) return nullptr;
+
+    // construct a new Spartan.InvokeResponse and populate object with return results
+    invoke_rsp_obj = env->NewObject(invoke_rsp_cls, invoke_rsp_ctor, child_pid, input_strm_rdr_obj);
+    if (!check_new_obj(invoke_rsp_obj, "Spartan.InvokeResponse as result of spawned program operation")) return nullptr;
+  } else {
+    // construct a new java.io.FileInputStream
+    auto const input_strm_err_obj = env->NewObject(file_input_strm_cls, file_input_strm_ctor, sp_err_fdesc_wrpr->_jobj);
+    if (!check_new_obj(input_strm_err_obj, "FileInputStream per the error input pipe fd")) return nullptr;
+
+    // java.io.FileOutputStream class and ctor
+    auto const file_output_strm_cls = find_class("java/io/FileOutputStream");
+    if (file_output_strm_cls == nullptr) return nullptr;
+
+    auto const file_output_strm_ctor = get_method(file_output_strm_cls, ctor_name, "(Ljava/io/FileDescriptor;)V");
+    if (file_output_strm_ctor == nullptr) return nullptr;
+
+    // construct a new java.io.FileOutputStream
+    auto const output_strm_wrt_obj = env->NewObject(file_output_strm_cls, file_output_strm_ctor, sp_wrt_fdesc_wrpr->_jobj);
+    if (!check_new_obj(output_strm_wrt_obj, "FileOutputStream per the control output pipe fd")) return nullptr;
+
+    // Spartan.InvokeResponseEx class and ctor
+    auto const invoke_rsp_cls = find_class("spartan.Spartan$InvokeResponseEx");
+    if (invoke_rsp_cls == nullptr) return nullptr;
+
+    auto const invoke_rsp_ctor = get_method(invoke_rsp_cls, ctor_name,
+                                            "(ILjava/io/InputStream;Ljava/io/InputStream;Ljava/io/OutputStream;)V");
+    if (invoke_rsp_ctor == nullptr) return nullptr;
+
+    // construct a new Spartan.InvokeResponseEx and populate object with return results
+    invoke_rsp_obj = env->NewObject(invoke_rsp_cls, invoke_rsp_ctor, child_pid,
+                                    input_strm_rdr_obj, input_strm_err_obj, output_strm_wrt_obj);
+    if (!check_new_obj(invoke_rsp_obj, "Spartan.InvokeResponseEx as result of spawned program operation")) return nullptr;
+  }
+
+  // make sure RAII smart pointers release streaming pipe fd (file descriptors)
+  // prior returning to returning to the caller (i.e., don't close them)
+  sp_child_rdr_fd.release();
+  sp_child_err_fd.release();
+  sp_child_wrt_fd.release();
+
+  return invoke_rsp_obj; // instance of spartan.Spartan.InvokeResponse or spartan.Spartan.InvokeResponseEx
 }
 
-/*
- * Class:     spartan_LaunchProgram
- * Method:    invokeCommand
- * Signature: ([Ljava/lang/String;)Lspartan/Spartan/InvokeResponse;
- */
-extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommand
-    (JNIEnv *env, jclass cls, jobjectArray args) {
-
+static jobject launchProgram_core_invokeCommand(
+    JNIEnv *env, jclass cls, jobjectArray args, bool const isExtended = false)
+{
   const jint argc = env->GetArrayLength(args);
   if (argc > 0) {
     struct {
@@ -619,7 +686,17 @@ extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommand
   };
   std::unique_ptr<utf_str_wrpr_t, decltype(deref_jobjs)> sp_progpath_utf_str(&utf_str_wrpr, deref_jobjs);
 
-  return invoke_spartan_subcommand(env, cls, sp_progpath_utf_str->utf_str, args);
+  return invoke_spartan_subcommand(env, cls, sp_progpath_utf_str->utf_str, args, isExtended);
+}
+
+/*
+ * Class:     spartan_LaunchProgram
+ * Method:    invokeCommand
+ * Signature: ([Ljava/lang/String;)Lspartan/Spartan/InvokeResponse;
+ */
+extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommand
+    (JNIEnv *env, jclass cls, jobjectArray args) {
+  return launchProgram_core_invokeCommand(env, cls, args);
 }
 
 /*
@@ -628,8 +705,8 @@ extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommand
  * Signature: ([Ljava/lang/String;)Lspartan/Spartan/InvokeResponseEx;
  */
 extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommandEx
-    (JNIEnv */*env*/, jclass /*cls*/, jobjectArray /*args*/) {
-  return nullptr;
+    (JNIEnv *env, jclass cls, jobjectArray args) {
+  return launchProgram_core_invokeCommand(env, cls, args, true);
 }
 
 static void killpid_helper(JNIEnv * const env, const pid_t pid, const int sig, const char * const sig_desc) {
