@@ -193,8 +193,8 @@ namespace launch_program {
       throw obtain_rsp_stream_exception{ std::move(err_msg) };
     }
 
-    assert(cmsg_payload.pipe_fds[0] > 0);
-    fd_wrapper_sp_t read_stream_fd_sp{ new fd_wrapper_t{ cmsg_payload.pipe_fds[0] }, &fd_cleanup_with_delete };
+    assert(cmsg_payload.p.pipe_fds[0] > 0);
+    fd_wrapper_sp_t read_stream_fd_sp{ new fd_wrapper_t{ cmsg_payload.p.pipe_fds[0] }, &fd_cleanup_with_delete };
 
     return std::make_tuple(pid_buffer.pid, std::move(read_stream_fd_sp));
   }
@@ -261,8 +261,9 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(int argc, char 
   auto uds_socket_name = make_fifo_pipe_name(progpath(), "JLauncher_UDS");
   auto const pipe_optn = format2str("-pipe=%s", uds_socket_name.c_str());
   argv_dup[1] = strdupa(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
+  auto const subcmd = argv_dup[2];
 
-  fd_wrapper_sp_t read_fd_sp = create_uds_socket([subcmd = argv_dup[2], &uds_socket_name](int err_no) -> std::string {
+  fd_wrapper_sp_t read_fd_sp = create_uds_socket([subcmd, &uds_socket_name](int err_no) -> std::string {
     const char err_msg_fmt[] = "failed creating parent unix uds %s socket for i/o to spawned program subcommand %s: %s";
     return format2str(err_msg_fmt, uds_socket_name.c_str(), subcmd, strerror(err_no));
   });

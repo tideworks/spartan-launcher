@@ -465,7 +465,12 @@ static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cs
   memset(&parent_msg, 0, sizeof(parent_msg));
   parent_msg.msg_name = &server_address;
   parent_msg.msg_namelen = address_length;
-  pipe_fds_buffer_t cmsg_payload{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rd_pipe_sp->fd } };
+  pipe_fds_buffer_t cmsg_payload; //{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rd_pipe_sp->fd } };
+  memset(&cmsg_payload, 0, sizeof(cmsg_payload));
+  cmsg_payload.cmsg.cmsg_len = 0;
+  cmsg_payload.cmsg.cmsg_level = SOL_SOCKET;
+  cmsg_payload.cmsg.cmsg_type = SCM_RIGHTS;
+  cmsg_payload.p.pipe_fds[0] = rd_pipe_sp->fd;
   parent_msg.msg_control = &cmsg_payload;
   parent_msg.msg_controllen = sizeof(cmsg_payload); // necessary for CMSG_FIRSTHDR to return the correct value
 
@@ -480,7 +485,7 @@ static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cs
     throw open_write_pipe_exception{ std::move(err_msg) };
   }
   log(LL::DEBUG, "%s(): ***** sent i/o pipe read fd{%d} datagram via named socket %s *****\n",
-      func_name, cmsg_payload.pipe_fds[0], uds_socket_name.c_str());
+      func_name, cmsg_payload.p.pipe_fds[0], uds_socket_name.c_str());
 
   return wr_pipe_sp; // returning i/o pipe write fd
 }
@@ -528,8 +533,9 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp) {
   auto rslt = obtain_response_stream(uds_socket_name, std::move(read_fd_sp));
   fd_wrapper_sp_t fd_sp{ std::move(std::get<1>(rslt)) };
+  auto const fd = fd_sp->fd;
 
-  auto const handle_fd_error = [fd = fd_sp->fd, &uds_socket_name](int err_no) {
+  auto const handle_fd_error = [fd, &uds_socket_name](int err_no) {
     log(LL::ERR, "failure reading pipe fd{%d} via uds socket %s:\n\t%s", fd, uds_socket_name.c_str(), strerror(err_no));
   };
 

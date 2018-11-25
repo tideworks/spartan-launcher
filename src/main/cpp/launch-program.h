@@ -47,14 +47,20 @@ namespace launch_program {
     int fd_rtn_count;
   };
 
-  struct pipe_fds_buffer_t {
+  union pipe_fds_buffer_t {
     cmsghdr cmsg;
-    int pipe_fds[1];
+    struct {
+      unsigned char cmsg_offset[sizeof(cmsg)];
+      int pipe_fds[1];
+    } p;
   };
 
-  struct pipes_fds_buffer_t {
+  union pipes_fds_buffer_t {
     cmsghdr cmsg;
-    int pipe_fds[3];
+    struct {
+      unsigned char cmsg_offset[sizeof(cmsg)];
+      int pipe_fds[3];
+    } p;
   };
 
   SO_EXPORT void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len);

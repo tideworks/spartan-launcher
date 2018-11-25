@@ -19,12 +19,13 @@ limitations under the License.
 #ifndef __FINDFILES_H__
 #define __FINDFILES_H__
 
+#include <functional>
 #include "spartan-exception.h"
 
 // declare findfiles_exception
 DECL_EXCEPTION(findfiles)
 
-typedef std::function<bool (const char * const filepath, const char * const filename)> findfiles_cb_t;
+using findfiles_cb_t = std::function<bool (const char * const filepath, const char * const filename)>;
 
 bool findfiles(const char * const wrkdir, findfiles_cb_t callback);
 
