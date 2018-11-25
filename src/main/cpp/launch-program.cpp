@@ -30,6 +30,7 @@ limitations under the License.
 #include <sys/syscall.h>
 #include <cxxabi.h>
 #include <algorithm>
+#include "string-view.h"
 #include "session-state.h"
 #include "process-cmd-dispatch-info.h"
 #include "path-concat.h"
@@ -41,6 +42,8 @@ limitations under the License.
 
 using logger::log;
 using logger::LL;
+
+using bpstd::string_view;
 
 DECL_EXCEPTION(find_program_path)
 DECL_EXCEPTION(create_uds_socket)
@@ -55,16 +58,14 @@ static volatile bool termination_flag = false;
 static std::string find_program_path(const char * const prog, const char * const path_var_name);
 
 namespace launch_program {
-  static std::string s_progpath;
+  static string_view s_progpath;
 
   // NOTE: this property must be set prior to using Java_spartan_LaunchProgram_invokeCommand()
   SO_EXPORT void set_progpath(const char *const progpath) {
-    s_progpath = std::string(progpath);
+    s_progpath = strdup(progpath);
   }
 
-  SO_EXPORT std::tuple<std::string,bool> try_resolve_program_path(const char * const prog,
-                                                                  const char * const path_var_name)
-  {
+  std::tuple<std::string, bool> try_resolve_program_path(const char * const prog, const char * const path_var_name) {
     try {
       return std::make_tuple(find_program_path(prog, path_var_name), true);
     } catch(const find_program_path_exception&) {

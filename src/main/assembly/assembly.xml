@@ -46,6 +46,12 @@
       <lineEnding>unix</lineEnding>
       <fileMode>0644</fileMode>
     </file>
+    <file>
+      <source>${basedir}/src/main/cpp/MIT-LICENSE.txt</source>
+      <outputDirectory>/</outputDirectory>
+      <lineEnding>unix</lineEnding>
+      <fileMode>0644</fileMode>
+    </file>
   </files>
   <dependencySets>
     <dependencySet>

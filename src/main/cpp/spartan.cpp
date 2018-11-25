@@ -16,7 +16,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
-#include <mqueue.h>
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
@@ -24,15 +23,17 @@ limitations under the License.
 #include <csignal>
 #include <sys/wait.h>
 #include <alloca.h>
-#include <libgen.h>
 #include <memory>
 #include <future>
 #include <cassert>
 #include <queue>
 #include <unordered_map>
 #include <algorithm>
+#include <mqueue.h>
+#include <libgen.h>
 #include <cxxabi.h>
 #include <popt.h>
+#include "string-view.h"
 #include "shm.h"
 #include "createjvm.h"
 #include "fifo-pipe.h"
@@ -51,12 +52,14 @@ using logger::log;
 using logger::LL;
 using logger::is_trace_level;
 
+using bpstd::string_view;
+
 static const size_t MSG_BUF_SZ = 4096;
-static const char STOP_CMD[] = "--STOP";
-static const char SHUTDOWN_CMD[] = "--SHUTDOWN";
-static const char STATUS_CMD[] = "--STATUS";
-static const char CHILD_PID_NOTIFY_CMD[] = "--CHILD_PID_NOTIFY";
-static const char CHILD_PID_COMPLETION_NOTIFY_CMD[] = "--CHILD_PID_COMPLETION_NOTIFY";
+static const string_view STOP_CMD{ "--STOP" };
+static const string_view SHUTDOWN_CMD{ "--SHUTDOWN" };
+static const string_view STATUS_CMD{ "--STATUS" };
+static const string_view CHILD_PID_NOTIFY_CMD{ "--CHILD_PID_NOTIFY" };
+static const string_view CHILD_PID_COMPLETION_NOTIFY_CMD{ "--CHILD_PID_COMPLETION_NOTIFY" };
 
 DECL_EXCEPTION(open_write_pipe)
 
@@ -68,26 +71,31 @@ static void signal_callback_handler(int /*sig*/) { // can be called asynchronous
   set_exit_flag_true();
 }
 
-std::string get_env_var(const char * const name) {
+inline const char* get_env_var(const char * const name) noexcept {
   char *val = getenv(name);
-  return val != nullptr ? std::string(val) : std::string();
+  return val != nullptr ? strdup(val) : "";
 }
 
-static std::string get_executable_dir() {
+static const char* get_executable_dir() noexcept {
   char strbuf[2048];
   auto n = readlink("/proc/self/exe", strbuf, sizeof(strbuf) - 1);
   if (n != -1) {
     strbuf[n] = '\0';
-    return std::string(dirname(strbuf));
+    try {
+      return strdup(static_cast<char *>(dirname(strbuf)));
+    } catch(...) {
+      fputs("dirname() threw exception attempting parse for directory of program", stderr);
+      _exit(EXIT_FAILURE);
+    }
   }
-  return std::string(".");
+  return ".";
 }
 
-static const std::string s_java_classpath = get_env_var("CLASSPATH");
-static const std::string s_java_home_path = get_env_var("JAVA_HOME");
-static const std::string s_executable_dir = get_executable_dir();
-static std::string s_progpath;
-static std::string s_progname;
+static const string_view s_java_classpath{ get_env_var("CLASSPATH") };
+static const string_view s_java_home_path{ get_env_var("JAVA_HOME") };
+static const string_view s_executable_dir{ get_executable_dir() };
+static string_view s_progpath;
+static string_view s_progname;
 const char * java_classpath() { return s_java_classpath.c_str(); }
 const char * java_home_path() { return s_java_home_path.c_str(); }
 const char * executable_dir() { return s_executable_dir.c_str(); }
@@ -164,10 +172,10 @@ using OP = Operation;
 int main(int argc, char **argv) {
   s_parent_thrd_pid = getpid();
   volatile int exit_code = EXIT_SUCCESS;
-  s_progpath = std::string(argv[0]);
-  s_progname = [](const char * const path) -> std::string {
-    char * const dup_path = strdupa(path);
-    return std::string(basename(dup_path));
+  s_progpath = strdup(argv[0]);
+  s_progname = [](const char * const path) -> const char* {
+    auto const dup_path = strdupa(path);
+    return strdup(basename(dup_path));
   }(progpath());
   logger::set_progname(progname());
   logger::set_to_unbuffered();
@@ -178,11 +186,11 @@ int main(int argc, char **argv) {
   signal(SIGINT, signal_callback_handler);
 
   // declare these as static storage
-  static std::string jlauncher_queue_name;
-  static std::string jsupervisor_queue_name;
+  static string_view jlauncher_queue_name;
+  static string_view jsupervisor_queue_name;
   // then initialize them as part of main() startup initialization execution
-  jlauncher_queue_name   = get_jlauncher_mq_queue_name(progname());
-  jsupervisor_queue_name = get_jsupervisor_mq_queue_name(progname());
+  jlauncher_queue_name   = strdup(get_jlauncher_mq_queue_name(progname()).c_str());
+  jsupervisor_queue_name = strdup(get_jsupervisor_mq_queue_name(progname()).c_str());
   // now also set these particular values into the send_mq_msg namespace subsystem of the spartan shared library
   send_mq_msg::set_progname(progname());
   // must set this property prior to using Java_spartan_LaunchProgram_invokeCommand()
@@ -202,14 +210,14 @@ int main(int argc, char **argv) {
   // the stop message and cause the supervisor program to exit
   quit_supervisor_on_term_code = [&exit_code](int term_code) {
     exit_code = term_code;
-    send_supervisor_mq_msg(STOP_CMD);
+    send_supervisor_mq_msg(STOP_CMD.c_str());
   };
 
   // static lambda (with closure) that is now defined to send
   // the stop message and cause the launcher program to exit
   quit_launcher_on_term_code = [&exit_code](int term_code) {
     exit_code = term_code;
-    send_launcher_mq_msg(STOP_CMD);
+    send_launcher_mq_msg(STOP_CMD.c_str());
   };
 
   auto const send_flattened_argv_msg = [argc,argv](const char * const uds_socket_name, const char * const queue_name,
@@ -220,11 +228,11 @@ int main(int argc, char **argv) {
   if (argc > 1) {
     // there are command line arguments to iterate and parse
     try {
-      static const char cfg_file[] = "config.ini";
-      static const char srvc_optn[] = "service";
-      static const char pipe_optn[] = "pipe=";
-      static const char status_cmd[] = "status";
-      static const char stop_cmd[] = "stop";
+      static const string_view cfg_file{ "config.ini" };
+      static const string_view srvc_optn{ "service" };
+      static const string_view pipe_optn{ "pipe=" };
+      static const string_view status_cmd{ "status" };
+      static const string_view stop_cmd{ "stop" };
       std::string pipe_option{}, command{};
       std::string uds_socket_name_arg{};
       Operation operation = OP::NONE;
@@ -235,11 +243,11 @@ int main(int argc, char **argv) {
       for(int i = 1; i < argc; i++) {
         if (*(argv[i]) == '-') {
           const char * const optn = argv[i] + 1;
-          if (strcasecmp(optn, srvc_optn) == 0) {
+          if (strcasecmp(optn, srvc_optn.c_str()) == 0) {
             if (operation == OP::NONE) {
               operation = OP::SERVICE;
             }
-          } else if (strncasecmp(optn, pipe_optn, strlen(pipe_optn)) == 0) {
+          } else if (strncasecmp(optn, pipe_optn.c_str(), pipe_optn.size()) == 0) {
             if (operation == OP::NONE) {
               operation = OP::INVOKED_COMMAND;
               pipe_option = argv[i];
@@ -247,15 +255,15 @@ int main(int argc, char **argv) {
           }
         } else {
           const char * const optn = argv[i];
-          if (strcasecmp(optn, status_cmd) == 0) {
+          if (strcasecmp(optn, status_cmd.c_str()) == 0) {
             if (operation == OP::NONE) {
               operation = OP::STATUS;
-              command = status_cmd;
+              command = status_cmd.c_str();
             }
-          } else if (strcasecmp(optn, stop_cmd) == 0) {
+          } else if (strcasecmp(optn, stop_cmd.c_str()) == 0) {
             if (operation == OP::NONE) {
               operation = OP::STOP;
-              command = stop_cmd;
+              command = stop_cmd.c_str();
             }
           } else {
             if (operation == OP::NONE) {
@@ -276,7 +284,7 @@ int main(int argc, char **argv) {
           case OP::SERVICE: {
             log(LL::INFO, "started as a service");
             const std::string jvmlib_path = determine_jvmlib_path();
-            sessionState session(cfg_file, jvmlib_path.c_str());
+            sessionState session(cfg_file.c_str(), jvmlib_path.c_str());
             const auto rtn_code = supervisor(argc, argv, session);
             if (exit_code == 0) {
               exit_code = rtn_code;
@@ -305,7 +313,7 @@ int main(int argc, char **argv) {
           case OP::STOP: { ;
             // issue a message to the parent supervisor that instructs
             // it to stop processing and do an orderly termination
-            exit_code = send_launcher_mq_msg(STOP_CMD);
+            exit_code = send_launcher_mq_msg(STOP_CMD.c_str());
             break;
           }
           case OP::COMMAND: {
@@ -329,13 +337,13 @@ int main(int argc, char **argv) {
             }
 
             // Obtain the appropriate mq queue name - is either the jlauncher queue or is the jsupervisor queue
-            auto const mq_queue_name = [](cmds_set_t const &cs, cmd_t const &c) -> std::string {
+            auto const mq_queue_name = [](cmds_set_t const &cs, cmd_t const &c) -> string_view {
               if (cs.count(c) > 0) {
                 log(LL::DEBUG, "running child processor command: %s", c.c_str());
-                return jlauncher_queue_name.c_str();
+                return jlauncher_queue_name;
               } else {
                 log(LL::DEBUG, "running supervisor command: %s", c.c_str());
-                return jsupervisor_queue_name.c_str();
+                return jsupervisor_queue_name;
               }
             }(cmds_set, command);
 
@@ -355,19 +363,18 @@ int main(int argc, char **argv) {
               uds_socket_name = uds_socket_name_arg;
             }
             exit_code = send_flattened_argv_msg(uds_socket_name.c_str(), mq_queue_name.c_str(),
-                                          [](int &_argc_ref, char *_argv[]) -> void {
-                                            const auto len = strlen(pipe_optn);
-                                            for(int n = 0; n < _argc_ref; n++) {
-                                              auto argv_item = _argv[n];
-                                              if (*argv_item == '-' && strncasecmp(++argv_item, pipe_optn, len) == 0) {
-                                                for(int j = n; j < _argc_ref; j++) {
-                                                  _argv[j] = _argv[j + 1];
-                                                }
-                                                _argc_ref--;
-                                                return;
-                                              }
-                                            }
-                                          });
+                      [](int &_argc_ref, char *_argv[]) -> void {
+                        for(int n = 0; n < _argc_ref; n++) {
+                          auto argv_item = _argv[n];
+                          if (*argv_item == '-' && strncasecmp(++argv_item, pipe_optn.c_str(), pipe_optn.size()) == 0) {
+                            for(int j = n; j < _argc_ref; j++) {
+                              _argv[j] = _argv[j + 1];
+                            }
+                            _argc_ref--;
+                            return;
+                          }
+                        }
+                      });
             // command line was posted as message to be processed, now
             // proceed to handle the response output stream appropriately
             if (exit_code == EXIT_SUCCESS) {
@@ -514,9 +521,9 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
 
   int n = strbuf_size;
   do_msg_fmt: {
-    n = snprintf(strbuf, (size_t) n, "%s %s", STATUS_CMD, uds_socket_name.c_str());
+    n = snprintf(strbuf, (size_t) n, "%s %s", STATUS_CMD.c_str(), uds_socket_name.c_str());
     if (n <= 0) {
-      log(LL::ERR, "failed synthesizing %s command string", STATUS_CMD);
+      log(LL::ERR, "failed synthesizing %s command string", STATUS_CMD.c_str());
       return EXIT_FAILURE;
     }
     if (n >= strbuf_size) {
@@ -1012,7 +1019,7 @@ static int supervisor(int argc, char **argv, sessionState& session) {
         shutting_down = true;
         set_exit_flag_true();
         const auto jsupervisor_queue_name = get_jsupervisor_mq_queue_name(progname());
-        exit_code = send_mq_msg::send_mq_msg(SHUTDOWN_CMD, jsupervisor_queue_name.c_str());
+        exit_code = send_mq_msg::send_mq_msg(SHUTDOWN_CMD.c_str(), jsupervisor_queue_name.c_str());
         // waitid on all forked child processes - including the supervisor JVM process
         waitid_on_forked_children(std::function<bool()>([&child_process_count]() -> bool {
           return (child_process_count--) <= 0;
@@ -1293,7 +1300,7 @@ try_again:
     char *save = nullptr;
     const char * const cmd = strtok_r(const_cast<char*>(msg_dup), delim, &save);
 
-    if (strncmp(cmd, CHILD_PID_NOTIFY_CMD, strlen(CHILD_PID_NOTIFY_CMD)) == 0) {
+    if (strncmp(cmd, CHILD_PID_NOTIFY_CMD.c_str(), CHILD_PID_NOTIFY_CMD.size()) == 0) {
       // notify supervisor of a child process that was forked
       const char * const pid = strtok_r(nullptr, delim, &save);
       assert(pid != nullptr);
@@ -1314,7 +1321,7 @@ try_again:
         log(LL::WARN, "%s(): no Java method defined to handle command:\n\t%s %s '%s'",
             func_name, cmd, pid, cmd_line);
       }
-    } else if (strncmp(cmd, CHILD_PID_COMPLETION_NOTIFY_CMD, strlen(CHILD_PID_COMPLETION_NOTIFY_CMD)) == 0) {
+    } else if (strncmp(cmd, CHILD_PID_COMPLETION_NOTIFY_CMD.c_str(), CHILD_PID_COMPLETION_NOTIFY_CMD.size()) == 0) {
       const char * const pid = strtok_r(nullptr, delim, &save);
       assert(pid != nullptr);
       if (!shm_session.spartanChildCompletionNotifyEntryPoint.empty()) {
@@ -1439,7 +1446,7 @@ try_again:
   {
     const char * const msg_dup = strndupa(buffer, (size_t) msg_size);
 
-    if (strcmp(msg_dup, STOP_CMD) == 0) {
+    if (strcmp(msg_dup, STOP_CMD.c_str()) == 0) {
       return processor_result_t(false, EXIT_SUCCESS); // initiate exiting activity of parent supervisor process
     }
 
@@ -1455,14 +1462,14 @@ try_again:
     static const char func_name[] = "msg_dispatch_for_supervisor";
     const char * const msg_dup = strndupa(buffer, (size_t) msg_size);
 
-    if (strcmp(msg_dup, SHUTDOWN_CMD) == 0) {
+    if (strcmp(msg_dup, SHUTDOWN_CMD.c_str()) == 0) {
       jvm_shutting_down = true;
       const auto ec = invoke_java_method(shm_session.jvm_sp.get(), &shm_session.spartanSupervisorShutdownEntryPoint);
       if (ec != EXIT_SUCCESS) {
         log(LL::ERR, "%s() did not complete command %s successfully", func_name, msg_dup);
       }
       return processor_result_t(false, ec); // complete exiting activity of parent supervisor process
-    } else if (strncmp(msg_dup, STATUS_CMD, strlen(STATUS_CMD)) == 0) {
+    } else if (strncmp(msg_dup, STATUS_CMD.c_str(), STATUS_CMD.size()) == 0) {
       if (!(flag != 0 || shutting_down || jvm_shutting_down)) {
         log(LL::INFO, "received: \"%s\"", msg_dup);
         static const char *const delim = " ";
@@ -1529,7 +1536,7 @@ static void supervisor_child_processor_notify(const pid_t child_pid, const char 
   char *strbuf = (char*) alloca(strbuf_size);
   int n = strbuf_size;
   do_str_fmt: {
-    n = snprintf(strbuf, (size_t) n, "%s %d %s", CHILD_PID_NOTIFY_CMD, child_pid, command_line);
+    n = snprintf(strbuf, (size_t) n, "%s %d %s", CHILD_PID_NOTIFY_CMD.c_str(), child_pid, command_line);
     assert(n > 0);
     if (n >= strbuf_size) {
       strbuf = (char*) alloca(strbuf_size = ++n);
@@ -1557,7 +1564,7 @@ static void supervisor_child_processor_completion_notify(const siginfo_t& info) 
   char *strbuf = (char*) alloca(strbuf_size);
   int n = strbuf_size;
   do_str_fmt: {
-    n = snprintf(strbuf, (size_t) n, "%s %d", CHILD_PID_COMPLETION_NOTIFY_CMD, info.si_pid);
+    n = snprintf(strbuf, (size_t) n, "%s %d", CHILD_PID_COMPLETION_NOTIFY_CMD.c_str(), info.si_pid);
     assert(n > 0);
     if (n >= strbuf_size) {
       strbuf = (char*) alloca(strbuf_size = ++n);

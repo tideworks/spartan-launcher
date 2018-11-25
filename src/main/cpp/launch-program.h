@@ -27,7 +27,7 @@ limitations under the License.
 namespace launch_program {
   // NOTE: this property must be set prior to using Java_spartan_LaunchProgram_invokeCommand()
   SO_EXPORT void set_progpath(const char *const progpath);
-  SO_EXPORT std::tuple<std::string, bool> try_resolve_program_path(const char * const prog, const char * const path_var_name);
+  std::tuple<std::string, bool> try_resolve_program_path(const char * const prog, const char * const path_var_name);
 
   // RAII-related declarations for managing file/pipe descriptors (to clean these up if exception thrown)
   struct fd_wrapper_t {
