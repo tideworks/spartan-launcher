@@ -22,7 +22,6 @@ limitations under the License.
 #include <memory>
 #include <functional>
 #include <unistd.h>
-#include "so-export.h"
 #include "spartan-exception.h"
 
 // declare create_pipe_descriptors_exception
@@ -39,7 +38,7 @@ DECL_EXCEPTION(read_file_descriptor)
 
 using fd_cleanup_t = std::function<void (int*)>;
 
-class SO_EXPORT StdOutCapture {
+class StdOutCapture {
 private:
   static void cleanup(int*);
   bool is_capturing = false;

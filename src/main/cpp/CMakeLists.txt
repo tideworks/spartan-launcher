@@ -12,14 +12,16 @@ if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_DEBUG")
 endif()
 
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath,'$ORIGIN/'")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath='\$ORIGIN/.'")
 
-set(SOURCE_FILES spartan.cpp spartan-exception.cpp findfiles.cpp ini.cpp cfgparse.cpp
-    createjvm.cpp shm.cpp memBufStream.cpp)
+SET(CMAKE_SKIP_BUILD_RPATH TRUE)
 
-set(LIB_SOURCE_FILES fifo-pipe.cpp mq-queue.cpp send-mq-msg.cpp spartan-exception.cpp
-    launch-program.cpp format2str.cpp log.cpp path-concat.cpp str-split.cpp session-state.cpp
-    process-cmd-dispatch-info.cpp StdOutCapture.cpp)
+set(SOURCE_FILES main.cpp)
+
+set(LIB_SOURCE_FILES spartan.cpp spartan-exception.cpp findfiles.cpp ini.cpp cfgparse.cpp
+    createjvm.cpp shm.cpp memBufStream.cpp fifo-pipe.cpp mq-queue.cpp send-mq-msg.cpp
+    spartan-exception.cpp launch-program.cpp format2str.cpp log.cpp path-concat.cpp
+    str-split.cpp session-state.cpp process-cmd-dispatch-info.cpp StdOutCapture.cpp)
 
 if(DEFINED ENV{spartan_build_dir})
   set(spartan_BUILD_DIR "$ENV{spartan_build_dir}")
@@ -36,7 +38,9 @@ add_library(spartan-shared SHARED ${LIB_SOURCE_FILES})
 
 add_executable(spartan ${SOURCE_FILES})
 
-target_link_libraries(spartan rt dl pthread popt spartan-shared)
+target_link_libraries(spartan-shared rt dl pthread popt)
+
+target_link_libraries(spartan spartan-shared)
 
 set_target_properties(spartan spartan-shared PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${EXECUTABLE_OUTPUT_PATH}"

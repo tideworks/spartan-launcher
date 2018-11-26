@@ -23,8 +23,10 @@ limitations under the License.
 #include <string>
 #include <cassert>
 #include <algorithm>
-#include <functional>
+#include "string-view.h"
 #include "log.h"
+
+using bpstd::string_view;
 
 namespace logger {
 
@@ -34,7 +36,7 @@ namespace logger {
   const LOGGING_LEVEL DEFAULT_LOGGING_LEVEL = LL::INFO;
 
   static volatile LOGGING_LEVEL loggingLevel = DEFAULT_LOGGING_LEVEL;
-  static std::string s_progname;
+  static string_view s_progname;
   static bool s_syslogging_enabled = true;
   static std::function<void(const char*, const bool)> s_call_openlog = [](const char* const ident, bool is_enabled) {
     if (is_enabled) {
@@ -46,13 +48,13 @@ namespace logger {
   };
 
   // NOTE: this property must be set on the logger namespace subsystem prior to use of its functions
-  SO_EXPORT void set_progname(const char *const progname) {
-    s_progname = std::string(progname);
+  void set_progname(const char *const progname) {
+    s_progname = strdup(progname);
     s_call_openlog(s_progname.c_str(), s_syslogging_enabled);
     s_call_openlog = [](const char* const ident, bool is_enabled) {};
   }
 
-  extern "C" SO_EXPORT void set_syslogging(bool is_syslogging_enabled) {
+  void set_syslogging(bool is_syslogging_enabled) {
     s_syslogging_enabled = is_syslogging_enabled;
     s_call_openlog(s_progname.c_str(), is_syslogging_enabled);
     s_call_openlog = [](const char* const ident, bool is_enabled) {};
@@ -61,7 +63,7 @@ namespace logger {
     }
   }
 
-  extern "C" SO_EXPORT LOGGING_LEVEL get_level() { return loggingLevel; }
+  LOGGING_LEVEL get_level() { return loggingLevel; }
 
   // trim from start
   static inline std::string& ltrim(std::string &s) {
@@ -80,29 +82,29 @@ namespace logger {
     return ltrim(rtrim(s));
   }
 
-  extern "C" SO_EXPORT LOGGING_LEVEL str_to_level(const char *const logging_level) {
+  LOGGING_LEVEL str_to_level(const char *const logging_level) {
     std::string log_level(logging_level);
     trim(log_level);
     std::transform(log_level.begin(), log_level.end(), log_level.begin(), ::toupper);
-    if (log_level.compare("TRACE") == 0) return LL::TRACE;
-    if (log_level.compare("DEBUG") == 0) return LL::DEBUG;
-    if (log_level.compare("INFO") == 0) return LL::INFO;
-    if (log_level.compare("WARN") == 0) return LL::WARN;
-    if (log_level.compare("ERR") == 0) return LL::ERR;
-    if (log_level.compare("FATAL") == 0) return LL::FATAL;
+    if (log_level == "TRACE") return LL::TRACE;
+    if (log_level == "DEBUG") return LL::DEBUG;
+    if (log_level == "INFO")  return LL::INFO;
+    if (log_level == "WARN")  return LL::WARN;
+    if (log_level == "ERR")   return LL::ERR;
+    if (log_level == "FATAL") return LL::FATAL;
     return DEFAULT_LOGGING_LEVEL; // didn't match anything so return default logging level
   }
 
-  extern "C" SO_EXPORT void set_level(LOGGING_LEVEL level) {
+  void set_level(LOGGING_LEVEL level) {
     loggingLevel = level;
   }
 
-  extern "C" SO_EXPORT void set_to_unbuffered() {
-    setvbuf(stdout, NULL, _IONBF, 0);
-    setvbuf(stderr, NULL, _IONBF, 0);
+  void set_to_unbuffered() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stderr, nullptr, _IONBF, 0);
   }
 
-  extern "C" SO_EXPORT void vlog(LOGGING_LEVEL level, const char * const fmt, va_list ap) {
+  void vlog(LOGGING_LEVEL level, const char * const fmt, va_list ap) {
     if ((char) level < (char) loggingLevel) {
       return;
     }
@@ -170,7 +172,7 @@ namespace logger {
     syslog_it(syslog_level, strbuf + len);
   }
 
-  extern "C" SO_EXPORT void log(LOGGING_LEVEL level, const char * const fmt, ...) {
+  void log(LOGGING_LEVEL level, const char * const fmt, ...) {
     if ((char) level < (char) loggingLevel) {
       return;
     }
@@ -181,7 +183,7 @@ namespace logger {
     va_end(ap);
   }
 
-  extern "C" SO_EXPORT void logm(LOGGING_LEVEL level, const char * const msg) {
+  void logm(LOGGING_LEVEL level, const char * const msg) {
     log(level, "%s", msg);
   }
 }

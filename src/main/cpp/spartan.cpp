@@ -34,6 +34,7 @@ limitations under the License.
 #include <cxxabi.h>
 #include <popt.h>
 #include "string-view.h"
+#include "so-export.h"
 #include "shm.h"
 #include "createjvm.h"
 #include "fifo-pipe.h"
@@ -169,7 +170,7 @@ bool icompare(const std::string &a, const std::string &b) {
 enum class Operation : short { NONE, SERVICE, INVOKED_COMMAND, STATUS, STOP, COMMAND };
 using OP = Operation;
 
-int main(int argc, char **argv) {
+extern "C" SO_EXPORT int exp_main(int argc, char **argv, bool const isExtended) {
   s_parent_thrd_pid = getpid();
   volatile int exit_code = EXIT_SUCCESS;
   s_progpath = strdup(argv[0]);
@@ -409,12 +410,6 @@ int main(int argc, char **argv) {
   }
   log(LL::INFO, "process %d exiting %s", getpid(), exit_code == 0 ? "normally" : "with error condition");
   _exit(exit_code); // do not change this to simple return - avoids side effect with Java JVM (per g++ 7.2.1)
-}
-
-extern "C" {
-  SO_EXPORT int exp_main(int argc, char **argv) {
-    return main(argc, argv);
-  }
 }
 
 static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cstr, int &rc) {
@@ -1135,7 +1130,7 @@ try_again:
     const mqd_t mqd;
     const pid_t pid;
   }
-      wrp_mqd = {send_mq_msg::mq_open(mq_queue_name.c_str(), O_CREAT | O_EXCL | O_RDONLY, 0662, &attr), getpid()};
+      wrp_mqd = {send_mq_msg::mq_open_ex(mq_queue_name.c_str(), O_CREAT | O_EXCL | O_RDONLY, 0662, &attr), getpid()};
   using wrp_mqd_t = decltype(wrp_mqd);
   auto const unlink_mqd = [](wrp_mqd_t *p) {
     if (p != nullptr) {
@@ -1148,7 +1143,7 @@ try_again:
   };
   std::unique_ptr<wrp_mqd_t, decltype(unlink_mqd)> mqd_sp(&wrp_mqd, unlink_mqd);
   if (mqd_sp->mqd == -1) {
-    log(LL::ERR, "mq_open('%s') failed(%d): %s", mq_queue_name.c_str(), errno, strerror(errno));
+    log(LL::ERR, "mq_open_ex('%s') failed(%d): %s", mq_queue_name.c_str(), errno, strerror(errno));
     if (errno == EEXIST) { // check if was name exists error - unlink the name as was orphaned
       mqd_sp.reset(nullptr);
       mqd_sp.reset(&wrp_mqd);

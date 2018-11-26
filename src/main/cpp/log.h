@@ -19,7 +19,6 @@ limitations under the License.
 #ifndef __LOG_H__
 #define __LOG_H__
 
-#include "so-export.h"
 #include <cstdarg>
 
 namespace logger {
@@ -33,25 +32,22 @@ namespace logger {
     DEBUG = 2,
     TRACE = 1
   };
-  typedef LOGGING_LEVEL LL;
+  using LL = LOGGING_LEVEL;
 
   // NOTE: this property must be set on the logger namespace subsystem prior to use of its functions
-  SO_EXPORT void set_progname(const char *const progname);
+  void set_progname(const char *const progname);
 
-  extern "C" {
-
-  SO_EXPORT void set_syslogging(bool is_syslogging_enabled);
-  SO_EXPORT LOGGING_LEVEL get_level();
+  void set_syslogging(bool is_syslogging_enabled);
+  LOGGING_LEVEL get_level();
   inline bool is_debug_level() { return get_level() == LL::DEBUG; }
   inline bool is_trace_level() { return get_level() == LL::TRACE; }
-  SO_EXPORT LOGGING_LEVEL str_to_level(const char *const logging_level);
-  SO_EXPORT void set_level(LOGGING_LEVEL level);
-  SO_EXPORT void set_to_unbuffered();
-  SO_EXPORT void vlog(LOGGING_LEVEL level, const char * const fmt, va_list ap);
-  SO_EXPORT void log(LOGGING_LEVEL level, const char * const fmt, ...);
-  SO_EXPORT void logm(LOGGING_LEVEL level, const char * const msg);
+  LOGGING_LEVEL str_to_level(const char *const logging_level);
+  void set_level(LOGGING_LEVEL level);
+  void set_to_unbuffered();
+  void vlog(LOGGING_LEVEL level, const char * const fmt, va_list ap);
+  void log(LOGGING_LEVEL level, const char * const fmt, ...);
+  void logm(LOGGING_LEVEL level, const char * const msg);
 
-  }
 }
 
 #endif //__LOG_H__

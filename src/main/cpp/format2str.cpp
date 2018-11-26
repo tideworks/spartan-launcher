@@ -20,7 +20,7 @@ limitations under the License.
 #include <cassert>
 #include "format2str.h"
 
-extern "C" SO_EXPORT std::string vformat2str(const char *const fmt, va_list ap) {
+std::string vformat2str(const char *const fmt, va_list ap) {
   int strbuf_size = 256;
   int n = strbuf_size;
   char *strbuf = (char*) alloca(strbuf_size);
@@ -39,7 +39,7 @@ extern "C" SO_EXPORT std::string vformat2str(const char *const fmt, va_list ap) 
   return std::string(strbuf);
 }
 
-extern "C" SO_EXPORT std::string format2str(const char *const fmt, ...) {
+std::string format2str(const char *const fmt, ...) {
   va_list ap;
   va_start(ap, fmt);
   auto rslt( vformat2str(fmt, ap) );

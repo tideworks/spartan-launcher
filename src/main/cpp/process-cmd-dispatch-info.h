@@ -22,7 +22,6 @@ limitations under the License.
 #include <functional>
 #include <unordered_set>
 #include <jni.h>
-#include "so-export.h"
 #include "shm.h"
 
 // forward declarations (dependency types for method signature declarations)
@@ -30,7 +29,7 @@ struct sessionState;
 
 namespace cmd_dsp {
 
-  class SO_EXPORT CmdDispatchInfoProcessor {
+  class CmdDispatchInfoProcessor {
   private:
     JNIEnv * const env;
     const char *&class_name;
@@ -54,8 +53,8 @@ namespace cmd_dsp {
                                            std::function<void(std::string &)> action);
   };
 
-  SO_EXPORT void get_cmd_dispatch_info(sessionState &ss);
-  SO_EXPORT std::unordered_set<std::string> get_child_processor_commands(const sessionState &ss);
+  void get_cmd_dispatch_info(sessionState &ss);
+  std::unordered_set<std::string> get_child_processor_commands(const sessionState &ss);
 }
 
 #endif //SPARTAN_PROCESS_CMD_DISPATCH_INFO_H

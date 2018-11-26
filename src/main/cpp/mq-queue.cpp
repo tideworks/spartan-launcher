@@ -27,10 +27,10 @@ static std::string get_mq_queue_name(const char * const name_tmpl, const char * 
   return format2str(name_tmpl, progname);
 }
 
-SO_EXPORT std::string get_jlauncher_mq_queue_name(const char * const progname) {
+std::string get_jlauncher_mq_queue_name(const char * const progname) {
   return get_mq_queue_name(JLAUNCHER_QUEUE_NAME, progname);
 }
 
-SO_EXPORT std::string get_jsupervisor_mq_queue_name(const char * const progname) {
+std::string get_jsupervisor_mq_queue_name(const char * const progname) {
   return get_mq_queue_name(JSUPERVISOR_QUEUE_NAME, progname);
 }

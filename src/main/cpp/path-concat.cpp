@@ -19,7 +19,7 @@ limitations under the License.
 #include <string>
 #include "path-concat.h"
 
-SO_EXPORT std::string path_concat(const char * const str1, const char * const str2) {
+std::string path_concat(const char * const str1, const char * const str2) {
   std::string path_rslt{str1};
   const auto len = path_rslt.length();
   if (len > 0) {

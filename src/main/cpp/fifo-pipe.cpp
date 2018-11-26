@@ -29,7 +29,7 @@ static const char JLAUNCHER_FIFO_PIPE_BASENAME[] = "JLauncher_FIFO_pipe";
 
 static volatile unsigned int seed = static_cast<unsigned>(time(nullptr));
 
-SO_EXPORT int get_rnd_nbr(const unsigned int min_n, const unsigned int max_n) {
+int get_rnd_nbr(const unsigned int min_n, const unsigned int max_n) {
   auto this_seed = seed;
   auto rnd_n = rand_r(&this_seed);
   const unsigned int range = 1 + max_n - min_n;
@@ -46,7 +46,7 @@ SO_EXPORT int get_rnd_nbr(const unsigned int min_n, const unsigned int max_n) {
 //
 // throws make_fifo_pipe_name_exception on failure.
 //
-SO_EXPORT std::string make_fifo_pipe_name(const char * const progname, const char * const fifo_pipe_basename) {
+std::string make_fifo_pipe_name(const char * const progname, const char * const fifo_pipe_basename) {
   const auto pid = getpid();
   int strbuf_size = 256;
   char *strbuf = (char*) alloca(strbuf_size);
@@ -66,7 +66,7 @@ SO_EXPORT std::string make_fifo_pipe_name(const char * const progname, const cha
   return std::string(strbuf);
 }
 
-SO_EXPORT std::string make_jlauncher_fifo_pipe_name(const char * const progname) {
+std::string make_jlauncher_fifo_pipe_name(const char * const progname) {
   return make_fifo_pipe_name(progname, JLAUNCHER_FIFO_PIPE_BASENAME);
 }
 
@@ -75,7 +75,7 @@ SO_EXPORT std::string make_jlauncher_fifo_pipe_name(const char * const progname)
 //
 // throws make_fifo_pipe_exception on failure.
 //
-SO_EXPORT void make_fifo_pipe(const char * const fifo_pipe_name) {
+void make_fifo_pipe(const char * const fifo_pipe_name) {
   auto n = mkfifo(fifo_pipe_name, 0666);
   if (n == -1) {
     const char * const err_msg_fmt = "%s() process %d Failed making FIFO_PIPE: %s";
@@ -88,7 +88,7 @@ SO_EXPORT void make_fifo_pipe(const char * const fifo_pipe_name) {
 //
 // throws open_fifo_pipe_exception on failure.
 //
-SO_EXPORT int open_fifo_pipe(const char * const pathname, const int flags) {
+int open_fifo_pipe(const char * const pathname, const int flags) {
   const int fd = open(pathname, flags);
   if (fd == -1) {
     const char * const err_msg_cstr = strerror(errno);
@@ -104,7 +104,7 @@ SO_EXPORT int open_fifo_pipe(const char * const pathname, const int flags) {
 //
 // throws close_fifo_pipe_exception on failure.
 //
-SO_EXPORT void close_fifo_pipe(const int fd, const char * const pipename) {
+void close_fifo_pipe(const int fd, const char * const pipename) {
   if (close(fd) == -1) {
     const char * const errmsg_cstr = strerror(errno);
     const char * const err_msg_fmt = "%s() process %d Failure closing FIFO pipe \"%s\": %s";

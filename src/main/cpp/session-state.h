@@ -21,7 +21,6 @@ limitations under the License.
 
 #include <iostream>
 #include <vector>
-#include "so-export.h"
 #include "spartan-exception.h"
 
 // declare invalid_initialization_exception
@@ -43,7 +42,7 @@ enum class WhichMethod : short { NONE = 0, MAIN, GET_STATUS, SUPERVISOR_SHUTDOWN
 using WM = WhichMethod;
 
 // class and struct declarations
-class SO_EXPORT methodDescriptorBase {
+class methodDescriptorBase {
 protected:
   bool isStaticMethod{true};
   WhichMethod whichMethod{WM::NONE};
@@ -61,7 +60,7 @@ public:
   virtual const char* jvm_optns_str() const = 0;
 };
 
-class SO_EXPORT methodDescriptor: public methodDescriptorBase {
+class methodDescriptor: public methodDescriptorBase {
 protected:
   std::string fullMethodName;
   std::string descriptor;
@@ -89,7 +88,7 @@ public:
   friend class cmd_dsp::CmdDispatchInfoProcessor;
 };
 
-class SO_EXPORT methodDescriptorCmd: public methodDescriptor {
+class methodDescriptorCmd: public methodDescriptor {
 protected:
   std::string command;
   std::string jvmOptionsCommandLine;
@@ -125,7 +124,7 @@ public:
   friend std::istream& operator >> (std::istream &is, methodDescriptorCmd &self);
 };
 
-struct SO_EXPORT sessionState {
+struct sessionState {
 private:
   static void close_libjvm(void*);
   static void cleanup_jvm(JavaVM*);
@@ -165,7 +164,7 @@ public:
 };
 
 #ifdef _DEBUG
-SO_EXPORT void debug_dump_sessionState(const sessionState& ss, const char edition = 'A');
+void debug_dump_sessionState(const sessionState& ss, const char edition = 'A');
 #endif
 
 #endif // __SESSION_STATE_H__

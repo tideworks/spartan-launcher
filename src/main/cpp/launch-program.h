@@ -22,11 +22,10 @@ limitations under the License.
 #include <string>
 #include <sys/un.h>
 #include <sys/socket.h>
-#include "so-export.h"
 
 namespace launch_program {
   // NOTE: this property must be set prior to using Java_spartan_LaunchProgram_invokeCommand()
-  SO_EXPORT void set_progpath(const char *const progpath);
+  void set_progpath(const char *const progpath);
   std::tuple<std::string, bool> try_resolve_program_path(const char * const prog, const char * const path_var_name);
 
   // RAII-related declarations for managing file/pipe descriptors (to clean these up if exception thrown)
@@ -39,8 +38,8 @@ namespace launch_program {
   };
   using fd_wrapper_cleanup_t = void(*)(fd_wrapper_t *);
   using fd_wrapper_sp_t = std::unique_ptr<fd_wrapper_t, fd_wrapper_cleanup_t>;
-  SO_EXPORT void fd_cleanup_no_delete(fd_wrapper_t *);
-  SO_EXPORT void fd_cleanup_with_delete(fd_wrapper_t *);
+  void fd_cleanup_no_delete(fd_wrapper_t *);
+  void fd_cleanup_with_delete(fd_wrapper_t *);
 
   struct pid_buffer_t {
     pid_t pid;
@@ -63,10 +62,10 @@ namespace launch_program {
     } p;
   };
 
-  SO_EXPORT void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len);
-  SO_EXPORT fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg);
-  SO_EXPORT std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd);
-  SO_EXPORT std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
+  void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len);
+  fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg);
+  std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd);
+  std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
                                                                       fd_wrapper_sp_t socket_read_fd_sp);
 }
 

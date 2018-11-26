@@ -22,6 +22,7 @@ limitations under the License.
 #include <memory>
 #include <cassert>
 #include <sys/stat.h>
+#include "string-view.h"
 #include "log.h"
 #include "send-mq-msg.h"
 
@@ -35,17 +36,19 @@ limitations under the License.
 using logger::log;
 using logger::LL;
 
+using bpstd::string_view;
+
 namespace send_mq_msg {
-  static std::string s_progname;
-  inline const char *progname() { return s_progname.c_str(); }
+  static string_view s_progname;
+  inline const char *progname() noexcept { return s_progname.c_str(); }
 
   // NOTE: this property must be set on the send_mq_msg namespace subsystem prior to use of its functions
-  SO_EXPORT void set_progname(const char *const progname) {
-    s_progname = std::string(progname);
+  void set_progname(const char *const progname) {
+    s_progname = strdup(progname);
   }
 
   // wraps call to OS API of same name - sets umask prior to call and then restores umask
-  SO_EXPORT mqd_t mq_open(const char *name, int oflag, mode_t mode, struct mq_attr *attr) {
+  mqd_t mq_open_ex(const char *name, int oflag, mode_t mode, struct mq_attr *attr) {
     const mode_t save_umask = umask(002); // coerce a default umask value for this call
     const mqd_t mqd = ::mq_open(name, oflag, mode, attr); // call the OS API now
     umask(save_umask);
@@ -68,15 +71,16 @@ namespace send_mq_msg {
   // The core function for sending a message to a specified mq queue; does
   // appropriate return code error checking, prints errors to stderr output
   // if detected, returns EXIT_SUCCESS on success or otherwise EXIT_FAILURE.
-  SO_EXPORT int send_mq_msg(const char *const msg, const char *const queue_name) {
+  int send_mq_msg(const char *const msg, const char *const queue_name) {
     log(LL::DEBUG, "%s() called:\n\tmsg: %s\n\tque: %s", __func__, msg, queue_name);
     struct {
       const mqd_t mqd;
     }
-        wrp_mqd = {send_mq_msg::mq_open(queue_name, O_WRONLY, 0662, NULL)};
+        wrp_mqd = {send_mq_msg::mq_open_ex(queue_name, O_WRONLY, 0662, NULL)};
+    using wrp_mqd_t = decltype(wrp_mqd);
     if (wrp_mqd.mqd == -1) {
       const auto rc = errno;
-      log(LL::ERR, "mq_open(\"%s\") failed: %s; (try starting service first)", queue_name, strerror(rc));
+      log(LL::ERR, "mq_open_ex(\"%s\") failed: %s; (try starting service first)", queue_name, strerror(rc));
 #if DBG_STK_TRC
       if (rc == EMFILE) {
         show_stackframe(EXIT_FAILURE);
@@ -84,7 +88,7 @@ namespace send_mq_msg {
 #endif
       return EXIT_FAILURE;
     }
-    auto const close_mqd = [](decltype(wrp_mqd) *p) {
+    auto const close_mqd = [](wrp_mqd_t *p) {
       if (p != nullptr) {
         mq_close(p->mqd);
       }
@@ -100,10 +104,10 @@ namespace send_mq_msg {
 // Put the argv args into a flattened string - double quote each arg then
 // send as a message to the parent supervisor process. If the fifo_pipe_name
 // parameter is not null, then it becomes the first argv argument (index zero).
-  SO_EXPORT int send_flattened_argv_mq_msg(int argc, char **argv, const char *const fifo_pipe_name,
+  int send_flattened_argv_mq_msg(int argc, char **argv, const char *const fifo_pipe_name,
                                            const char *const queue_name, str_array_filter_cb_t filter) {
     // duplicate the argv array into temp stack memory array, argv_dup
-    char **const argv_dup = (char **) alloca((argc + 1) * sizeof(argv[0]));
+    auto const argv_dup = (char**) alloca((argc + 1) * sizeof(argv[0]));
     argv_dup[argc] = nullptr; // argv convention is that there is a nullptr sentinel element at end of the array
     argv_dup[0] = const_cast<char *>(fifo_pipe_name);
     for (int i = 1; i < argc; i++) {
@@ -115,13 +119,13 @@ namespace send_mq_msg {
     static const auto quote_ch = '"';
     static const auto space_ch = ' ';
     static const auto null_ch = '\0';
-    size_t *const argv_sizes = (size_t *) alloca(argc * sizeof(size_t));
+    auto const argv_sizes = (size_t*) alloca(argc * sizeof(size_t));
     argv_sizes[0] = argv_dup[0] != nullptr ? strlen(argv_dup[0]) : 0;
     size_t buf_size = 0;
     for (int i = start_index; i < argc; i++) {
       buf_size += ((argv_sizes[i] = strlen(argv_dup[i])) + quote_overhead);
     }
-    char *const buf = (char *) alloca(++buf_size);
+    auto const buf = (char*) alloca(++buf_size);
     buf[0] = null_ch; // null terminate buffer
     char *bufpos = buf;
     // now run through the argv_dup array, copy each arg

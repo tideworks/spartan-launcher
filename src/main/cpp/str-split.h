@@ -21,17 +21,12 @@ limitations under the License.
 
 #include <string>
 #include <vector>
-#include "so-export.h"
-
-extern "C" {
 
 // Utility function that can be used to split an input C string into a returned vector
 // of std::string parts where is split on a specified character. By default will split
 // on every occurrence of the split character, but if limit argument is explicitly
 // passed, then will split on (limit - 1) occurrences; e.g., a limit value of 1 returns
 // a vector containing a std::string that is a full copy of the original input C string.
-SO_EXPORT std::vector<std::string> str_split(const char *s, const char c, int limit = 0);
-
-}
+std::vector<std::string> str_split(const char *s, const char c, int limit = 0);
 
 #endif //__STR_SPLIT_H__

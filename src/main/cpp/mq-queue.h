@@ -20,13 +20,9 @@ limitations under the License.
 #define __MQ_QUEUE_H__
 
 #include <string>
-#include "so-export.h"
 
-extern "C" {
+std::string get_jlauncher_mq_queue_name(const char * const progname);
 
-SO_EXPORT std::string get_jlauncher_mq_queue_name(const char * const progname);
+std::string get_jsupervisor_mq_queue_name(const char * const progname);
 
-SO_EXPORT std::string get_jsupervisor_mq_queue_name(const char * const progname);
-
-}
 #endif /* __MQ_QUEUE_H__ */

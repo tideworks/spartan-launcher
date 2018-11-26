@@ -37,6 +37,7 @@ limitations under the License.
 #include "format2str.h"
 #include "fifo-pipe.h"
 #include "log.h"
+#include "so-export.h"
 #include "spartan_LaunchProgram.h"
 #include "launch-program.h"
 
@@ -61,7 +62,7 @@ namespace launch_program {
   static string_view s_progpath;
 
   // NOTE: this property must be set prior to using Java_spartan_LaunchProgram_invokeCommand()
-  SO_EXPORT void set_progpath(const char *const progpath) {
+  void set_progpath(const char *const progpath) {
     s_progpath = strdup(progpath);
   }
 
@@ -73,14 +74,14 @@ namespace launch_program {
     }
   }
 
-  SO_EXPORT void fd_cleanup_no_delete(fd_wrapper_t *p) {
+  void fd_cleanup_no_delete(fd_wrapper_t *p) {
     if (p != nullptr && p->fd != -1) {
       close(p->fd);
       p->fd = -1;
     }
   }
 
-  SO_EXPORT void fd_cleanup_with_delete(fd_wrapper_t *p) {
+  void fd_cleanup_with_delete(fd_wrapper_t *p) {
     if (p != nullptr && p->fd != -1) {
       close(p->fd);
       p->fd = -1;
@@ -88,7 +89,7 @@ namespace launch_program {
     delete p;
   }
 
-  SO_EXPORT void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len) {
+  void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len) {
     memset(&addr, 0, sizeof(sockaddr_un));
     addr.sun_family = AF_UNIX;
     auto const path_buf_end = sizeof(addr.sun_path) - 1;
@@ -98,7 +99,7 @@ namespace launch_program {
     addr_len = sizeof(sockaddr_un) - (sizeof(addr.sun_path) - uds_sock_name.size());
   }
 
-  SO_EXPORT fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg) {
+  fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg) {
     auto fd = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (fd < 0) {
       throw create_uds_socket_exception{ get_errmsg(errno) };
@@ -107,7 +108,7 @@ namespace launch_program {
     return fd_wrapper_sp_t{ new fd_wrapper_t{ fd }, &fd_cleanup_with_delete };
   }
 
-  SO_EXPORT std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd) {
+  std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd) {
     auto const progname = [](const char * const path) -> std::string {
       char * const dup_path = strdupa(path);
       return std::string(basename(dup_path));
@@ -134,7 +135,7 @@ namespace launch_program {
     return std::make_tuple(std::move(socket_fd_sp), std::move(uds_socket_name));
   }
 
-  SO_EXPORT std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
+  std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
                                                                       fd_wrapper_sp_t socket_read_fd_sp)
   {
     static const char* const func_name = __FUNCTION__;
@@ -245,11 +246,9 @@ static std::string find_program_path(const char * const prog, const char * const
   throw find_program_path_exception(format2str(err_msg_fmt, prog, path_var_name));
 }
 
-extern "C" {
-  SO_EXPORT int exp_main(int argc, char **argv);
-}
-
-static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(int argc, char **argv, const char * const prog_path) {
+static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
+    int argc, char **argv, const char * const prog_path, bool const isExtended)
+{
   auto const argc_dup = argc + 1; // bump up by one for added -pipe= option
   char **const argv_dup = (char **) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
   argv_dup[0] = strdupa(prog_path); // file path of program to be spawned
@@ -285,7 +284,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(int argc, char 
     throw fork_exception(format2str(err_msg_fmt, getpid(), strerror(errno)));
   } else if (pid == 0) {
     // is child process
-    auto rtn = exp_main(argc_dup, argv_dup); // execute spartan main() through direct call stack
+    auto rtn = exp_main(argc_dup, argv_dup, isExtended); // execute spartan main() through direct call stack
     exit(rtn);
   }
 
@@ -309,7 +308,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
     }
   }
 
-  auto rslt = fork2main(argc, argv, prog_path.c_str());
+  auto rslt = fork2main(argc, argv, prog_path.c_str(), isExtended);
   pid_t const pid = std::get<0>(rslt);
   fd_wrapper_sp_t socket_read_fd_sp{ std::move(std::get<1>(rslt)) };
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };

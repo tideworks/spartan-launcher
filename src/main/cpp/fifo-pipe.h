@@ -20,9 +20,6 @@ limitations under the License.
 #define __FIFO_PIPE_H__
 
 #include "spartan-exception.h"
-#include "so-export.h"
-
-extern "C" {
 
 // declare make_fifo_pipe_name_exception
 DECL_EXCEPTION(make_fifo_pipe_name)
@@ -36,34 +33,33 @@ DECL_EXCEPTION(open_fifo_pipe)
 // declare close_fifo_pipe_exception
 DECL_EXCEPTION(close_fifo_pipe)
 
-SO_EXPORT int get_rnd_nbr(const unsigned int min_n, const unsigned int max_n);
+int get_rnd_nbr(const unsigned int min_n, const unsigned int max_n);
 
 // Utility function that makes a fifo pipe name
 //
 // throws make_fifo_pipe_name_exception on failure.
 //
-SO_EXPORT std::string make_fifo_pipe_name(const char * const progname, const char * const fifo_pipe_basename);
+std::string make_fifo_pipe_name(const char * const progname, const char * const fifo_pipe_basename);
 
-SO_EXPORT std::string make_jlauncher_fifo_pipe_name(const char * const progname);
+std::string make_jlauncher_fifo_pipe_name(const char * const progname);
 
 // Utility function that makes a fifo pipe based
 // on name as supplied as an argument.
 //
 // throws make_fifo_pipe_exception on failure.
 //
-SO_EXPORT void make_fifo_pipe(const char * const fifo_pipe_name);
+void make_fifo_pipe(const char * const fifo_pipe_name);
 
 // Utility function that opens a fifo pipe.
 //
 // throws open_fifo_pipe_exception on failure.
 //
-SO_EXPORT int open_fifo_pipe(const char * const pathname, const int flags);
+int open_fifo_pipe(const char * const pathname, const int flags);
 
 // Utility function that closes a fifo pipe.
 //
 // throws close_fifo_pipe_exception on failure.
 //
-SO_EXPORT void close_fifo_pipe(const int fd, const char * const pipename);
+void close_fifo_pipe(const int fd, const char * const pipename);
 
-}
 #endif // __FIFO_PIPE_H__

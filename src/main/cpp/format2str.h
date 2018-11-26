@@ -21,14 +21,9 @@ limitations under the License.
 
 #include <string>
 #include <cstdarg>
-#include "so-export.h"
 
-extern "C" {
+std::string vformat2str(const char *const fmt, va_list ap);
 
-SO_EXPORT std::string vformat2str(const char *const fmt, va_list ap);
-
-SO_EXPORT std::string format2str(const char *const fmt, ...);
-
-}
+std::string format2str(const char *const fmt, ...);
 
 #endif //__FORMAT2STR_H__
