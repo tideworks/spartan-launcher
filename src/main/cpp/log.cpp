@@ -23,6 +23,7 @@ limitations under the License.
 #include <string>
 #include <cassert>
 #include <algorithm>
+#include <functional>
 #include "string-view.h"
 #include "log.h"
 

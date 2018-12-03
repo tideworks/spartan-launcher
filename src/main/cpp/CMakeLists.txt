@@ -36,14 +36,15 @@ SET(EXECUTABLE_OUTPUT_PATH "${LIBRARY_OUTPUT_PATH}")
 
 add_library(spartan-shared SHARED ${LIB_SOURCE_FILES})
 
-add_executable(spartan ${SOURCE_FILES})
+add_executable(${PROJECT_NAME} ${SOURCE_FILES})
 
 target_link_libraries(spartan-shared rt dl pthread popt)
 
-target_link_libraries(spartan spartan-shared)
+target_link_libraries(${PROJECT_NAME} spartan-shared)
 
-set_target_properties(spartan spartan-shared PROPERTIES
+set_target_properties(${PROJECT_NAME} spartan-shared PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${EXECUTABLE_OUTPUT_PATH}"
+    OUTPUT_NAME spartan
 )
 
 add_custom_command(TARGET spartan-shared POST_BUILD
