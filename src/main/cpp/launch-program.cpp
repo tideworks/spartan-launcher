@@ -114,14 +114,14 @@ namespace launch_program {
       return std::string(basename(dup_path));
     }(s_progpath.c_str());
 
-    auto const uds_socket_name = make_fifo_pipe_name(progname.c_str(), "JLauncher_UDS");
+    auto uds_socket_name = make_fifo_pipe_name(progname.c_str(), "JLauncher_UDS");
 
     auto socket_fd_sp = create_uds_socket([sub_cmd](int err_no) -> std::string {
       const char err_msg_fmt[] = "failed creating parent uds socket for i/o to spawned program subcommand %s: %s";
       return format2str(err_msg_fmt, sub_cmd, strerror(err_no));
     });
 
-    sockaddr_un server_address;
+    sockaddr_un server_address{0};
     socklen_t address_length;
     init_sockaddr(uds_socket_name, server_address, address_length);
 
@@ -135,16 +135,16 @@ namespace launch_program {
     return std::make_tuple(std::move(socket_fd_sp), std::move(uds_socket_name));
   }
 
-  std::tuple<pid_t, fd_wrapper_sp_t> obtain_response_stream(std::string const &uds_socket_name,
-                                                                      fd_wrapper_sp_t socket_read_fd_sp)
+  std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> obtain_response_stream(
+      std::string const &uds_socket_name, fd_wrapper_sp_t socket_read_fd_sp)
   {
     static const char* const func_name = __FUNCTION__;
 
-    sockaddr_un server_address;
+    sockaddr_un server_address{0};
     socklen_t address_length;
     init_sockaddr(uds_socket_name, server_address, address_length);
 
-    pid_buffer_t pid_buffer;
+    pid_buffer_t pid_buffer{0};
     memset(&pid_buffer, 0, sizeof(pid_buffer));
 
     int line_nbr = __LINE__ + 1;
@@ -162,22 +162,30 @@ namespace launch_program {
     assert(bytes_received == (long) sizeof(pid_buffer));
     assert(pid_buffer.pid > 0 && pid_buffer.fd_rtn_count > 0);
 
-    if (pid_buffer.fd_rtn_count != 1) {
-      const char err_msg_fmt[] = "%d: %s() -> expected exactly 1 read pipe fd count via uds %s socket - not %d";
+    if (pid_buffer.fd_rtn_count != 1 && pid_buffer.fd_rtn_count != 3) {
+      const char err_msg_fmt[] = "%d: %s() -> expected exactly 1 or 3 pipe fd(s) count via uds %s socket - not %d";
       auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), pid_buffer.fd_rtn_count);
       throw obtain_rsp_stream_exception{ std::move(err_msg) };
     }
 
     init_sockaddr(uds_socket_name, server_address, address_length);
 
-    msghdr client_recv_msg;
+    msghdr client_recv_msg{nullptr};
     memset(&client_recv_msg, 0, sizeof(client_recv_msg));
     client_recv_msg.msg_name = &server_address;
     client_recv_msg.msg_namelen = address_length;
-    pipe_fds_buffer_t cmsg_payload;
-    memset(&cmsg_payload, 0, sizeof(cmsg_payload));
-    client_recv_msg.msg_control = &cmsg_payload;
-    client_recv_msg.msg_controllen = sizeof(cmsg_payload); // necessary for CMSG_FIRSTHDR to return the correct value
+
+    pipe_fds_buffer_t  cmsg_payload_of_1{0};
+    pipes_fds_buffer_t cmsg_payload_of_3{0};
+    if (pid_buffer.fd_rtn_count == 1) {
+      memset(&cmsg_payload_of_1, 0, sizeof(cmsg_payload_of_1));
+      client_recv_msg.msg_control = &cmsg_payload_of_1;
+      client_recv_msg.msg_controllen = sizeof(cmsg_payload_of_1); // necessary for CMSG_FIRSTHDR to return correct value
+    } else {
+      memset(&cmsg_payload_of_3, 0, sizeof(cmsg_payload_of_3));
+      client_recv_msg.msg_control = &cmsg_payload_of_3;
+      client_recv_msg.msg_controllen = sizeof(cmsg_payload_of_3); // necessary for CMSG_FIRSTHDR to return correct value
+    }
 
     auto rc = recvmsg(socket_read_fd_sp->fd, &client_recv_msg, 0); line_nbr = __LINE__;
     if (rc < 0) {
@@ -185,20 +193,33 @@ namespace launch_program {
       auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), strerror(errno));
       throw obtain_rsp_stream_exception{ std::move(err_msg) };
     }
+
     const cmsghdr* const cmsg = CMSG_FIRSTHDR(&client_recv_msg);
-    assert(cmsg != nullptr);
-    assert(cmsg->cmsg_type == SCM_RIGHTS);
     line_nbr = __LINE__ + 1;
     if (cmsg == nullptr || cmsg->cmsg_type != SCM_RIGHTS) {
-      const char *const err_msg_fmt = "%d: %s() -> recvmsg(): no read pipe fd returned from uds %s socket:\n\t%s";
+      const char *const err_msg_fmt = "%d: %s() -> recvmsg(): no pipe fd(s) returned from uds %s socket:\n\t%s";
       auto err_msg = format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), "invalid datagram message");
       throw obtain_rsp_stream_exception{ std::move(err_msg) };
     }
 
-    assert(cmsg_payload.p.pipe_fds[0] > 0);
-    fd_wrapper_sp_t read_stream_fd_sp{ new fd_wrapper_t{ cmsg_payload.p.pipe_fds[0] }, &fd_cleanup_with_delete };
+    fd_wrapper_sp_t sp_child_rdr_fd{ nullptr, &fd_cleanup_with_delete };
+    fd_wrapper_sp_t sp_child_err_fd{ nullptr, &fd_cleanup_with_delete };
+    fd_wrapper_sp_t sp_child_wrt_fd{ nullptr, &fd_cleanup_with_delete };
 
-    return std::make_tuple(pid_buffer.pid, std::move(read_stream_fd_sp));
+    if (pid_buffer.fd_rtn_count == 1) {
+      assert(cmsg_payload_of_1.p.pipe_fds[0] > 0);
+      sp_child_rdr_fd.reset(new fd_wrapper_t{cmsg_payload_of_1.p.pipe_fds[0]});
+    } else {
+      assert(cmsg_payload_of_3.p.pipe_fds[0] > 0);
+      sp_child_rdr_fd.reset(new fd_wrapper_t{cmsg_payload_of_3.p.pipe_fds[0]});
+      assert(cmsg_payload_of_3.p.pipe_fds[1] > 0);
+      sp_child_err_fd.reset(new fd_wrapper_t{cmsg_payload_of_3.p.pipe_fds[1]});
+      assert(cmsg_payload_of_3.p.pipe_fds[2] > 0);
+      sp_child_wrt_fd.reset(new fd_wrapper_t{cmsg_payload_of_3.p.pipe_fds[2]});
+    }
+
+    return std::make_tuple(pid_buffer.pid,
+                           std::move(sp_child_rdr_fd), std::move(sp_child_err_fd), std::move(sp_child_wrt_fd));
   }
 }
 
@@ -215,7 +236,7 @@ static std::string get_env_var(const char * const name) {
 static std::string find_program_path(const char * const prog, const char * const path_var_name) {
   const std::string path_env_var( get_env_var(path_var_name) );
 
-  if (path_env_var.size() <= 0) {
+  if (path_env_var.empty()) {
     const char * const err_msg_fmt = "there is no %s environment variable defined";
     throw find_program_path_exception(format2str(err_msg_fmt, path_var_name));
   }
@@ -234,7 +255,7 @@ static std::string find_program_path(const char * const prog, const char * const
     auto full_path( format2str(fmt, path, prog) );
     log(LL::DEBUG, "'%s'", full_path.c_str());
     // check to see if program file path exist
-    struct stat statbuf;
+    struct stat statbuf{0};
     if (stat(full_path.c_str(), &statbuf) != -1 && ((statbuf.st_mode & S_IFMT) == S_IFREG ||
                                                     (statbuf.st_mode & S_IFMT) == S_IFLNK)) {
       return full_path;
@@ -268,7 +289,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
     return format2str(err_msg_fmt, uds_socket_name.c_str(), subcmd, strerror(err_no));
   });
 
-  sockaddr_un server_address;
+  sockaddr_un server_address{0};
   socklen_t address_length;
   init_sockaddr(uds_socket_name, server_address, address_length);
 
@@ -299,7 +320,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
     prog_path = find_program_path(prog_name, "PATH"); // determine fully qualified path to the program
   } else {
     // verify that the specified program path exist and is a file or symbolic link
-    struct stat statbuf;
+    struct stat statbuf{0};
     if (stat(prog_name, &statbuf) == -1 || !((statbuf.st_mode & S_IFMT) == S_IFREG ||
                                              (statbuf.st_mode & S_IFMT) == S_IFLNK))
     {
@@ -310,10 +331,9 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
 
   auto rslt = fork2main(argc, argv, prog_path.c_str(), isExtended);
   pid_t const pid = std::get<0>(rslt);
-  fd_wrapper_sp_t socket_read_fd_sp{ std::move(std::get<1>(rslt)) };
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
 
-  auto rslt2 = obtain_response_stream(uds_socket_name, std::move(socket_read_fd_sp));
+  auto rslt2 = obtain_response_stream(uds_socket_name, std::move(std::get<1>(rslt)));
   pid_t const child_pid = std::get<0>(rslt2);
   fd_wrapper_sp_t child_read_fd_sp{ std::move(std::get<1>(rslt2)) };
 
@@ -333,16 +353,15 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
       }
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
-    log(LL::DEBUG, "%s(): ***** forked launcher child process (pid:%d) of child program subcommand %s completed *****\n",
+    log(LL::DEBUG, "%s(): **** forked launcher child process (pid:%d) of child program subcommand %s completed ****\n",
         __FUNCTION__, pid, argv[1]);
   }
 
-  log(LL::DEBUG, "%s(): ***** spawned child program subcommand %s pid: %d *****\n", __FUNCTION__, argv[1], child_pid);
+  log(LL::DEBUG, "%s(): **** spawned child program subcommand %s pid: %d ****\n", __FUNCTION__, argv[1], child_pid);
 
   // return pid and fd per launched child process
   return std::make_tuple(child_pid, std::move(child_read_fd_sp),
-                         std::move(fd_wrapper_sp_t{ nullptr, &fd_cleanup_with_delete }),
-                         std::move(fd_wrapper_sp_t{ nullptr, &fd_cleanup_with_delete }));
+                         std::move(std::move(std::get<2>(rslt2))), std::move(std::move(std::get<3>(rslt2))));
 }
 
 static const char * const invoke_child_cmd_errmsg_fmt = "unknown child command: %s";
@@ -660,7 +679,7 @@ static jobject launchProgram_core_invokeCommand(
     sessionState shm_session;
     cmd_dsp::get_cmd_dispatch_info(shm_session);
     const auto cmds_set(cmd_dsp::get_child_processor_commands(shm_session));
-    if (cmds_set.count(cmd.c_str()) <= 0) {
+    if (cmds_set.count(cmd) <= 0) {
       throw_java_exception(env, invkcmd_excptn_cls, invoke_child_cmd_errmsg_fmt, sp_cmd->c_str);
       return nullptr;
     }
