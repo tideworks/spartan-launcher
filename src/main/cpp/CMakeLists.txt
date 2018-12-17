@@ -44,6 +44,10 @@ target_link_libraries(${PROJECT_NAME} spartan-shared)
 
 set_target_properties(${PROJECT_NAME} spartan-shared PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${EXECUTABLE_OUTPUT_PATH}"
+)
+
+set_target_properties(${PROJECT_NAME} ${PROJECT_NAME} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${EXECUTABLE_OUTPUT_PATH}"
     OUTPUT_NAME spartan
 )
 
