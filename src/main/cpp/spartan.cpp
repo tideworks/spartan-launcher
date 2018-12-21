@@ -72,8 +72,18 @@ static void signal_callback_handler(int /*sig*/) { // can be called asynchronous
   set_exit_flag_true();
 }
 
-inline const char* get_env_var(const char * const name) noexcept {
+// This declaration appears in assert.h and is part of stdc library definition. However,
+// it is dependent upon conditional compilation controlled via NDEBUG macro definition.
+// Here we are using it regardless of whether is debug or non-debug build, so declaring
+// it extern explicitly.
+extern "C" void __assert (const char *__assertion, const char *__file, int __line)
+      __THROW __attribute__ ((__noreturn__));
+
+inline const char* get_env_var(const char * const name, const bool do_assert = false) noexcept {
   char *val = getenv(name);
+  if (val == nullptr && do_assert) {
+    __assert("get_env_var() did not find expected environment variable to be defined", __FILE__, __LINE__);
+  }
   return val != nullptr ? strdup(val) : "";
 }
 
@@ -85,18 +95,19 @@ static const char* get_executable_dir() noexcept {
     try {
       return strdup(static_cast<char *>(dirname(strbuf)));
     } catch(...) {
-      fputs("dirname() threw exception attempting parse for directory of program", stderr);
-      _exit(EXIT_FAILURE);
+      __assert("dirname() threw exception attempting parse for directory of program", __FILE__, __LINE__);
     }
   }
   return ".";
 }
 
 static const string_view s_java_classpath{ get_env_var("CLASSPATH") };
-static const string_view s_java_home_path{ get_env_var("JAVA_HOME") };
+static const string_view s_java_home_path{ get_env_var("JAVA_HOME", true) };
 static const string_view s_executable_dir{ get_executable_dir() };
 static string_view s_progpath;
 static string_view s_progname;
+static string_view s_jlauncher_queue_name;
+static string_view s_jsupervisor_queue_name;
 const char * java_classpath() { return s_java_classpath.c_str(); }
 const char * java_home_path() { return s_java_home_path.c_str(); }
 const char * executable_dir() { return s_executable_dir.c_str(); }
@@ -147,9 +158,9 @@ static auto const shmAllocatorCleanup = [](shm::ShmAllocator *p) {
 using shmAllocatorCleanup_t = decltype(shmAllocatorCleanup);
 static std::unique_ptr<shm::ShmAllocator, shmAllocatorCleanup_t> spShmAlloctr(nullptr, shmAllocatorCleanup);
 
-static std::function<int(const char*)> send_supervisor_mq_msg = [](const char * const msg) -> int{return EXIT_SUCCESS;};
-static std::function<void(int)> quit_launcher_on_term_code   = [](int status_code){ _exit(status_code); };
-static std::function<void(int)> quit_supervisor_on_term_code = [](int /*status_code*/){};
+static std::function<int(const char*)> send_supervisor_mq_msg{ [](const char * const msg)-> int{return EXIT_SUCCESS;} };
+static std::function<void(int)> quit_launcher_on_term_code{ [](int status_code){ _exit(status_code); } };
+static std::function<void(int)> quit_supervisor_on_term_code{ [](int /*status_code*/){} };
 
 static int s_parent_thrd_pid = 0;
 inline int get_parent_pid() { return s_parent_thrd_pid; }
@@ -162,17 +173,12 @@ bool icompare(const std::string &a, const std::string &b) {
   if (a.length() == b.length()) {
     return std::equal(b.begin(), b.end(),
                       a.begin(), icompare_pred);
-  } else {
-    return false;
   }
+  return false;
 }
 
-enum class Operation : short { NONE, SERVICE, INVOKED_COMMAND, STATUS, STOP, COMMAND };
-using OP = Operation;
-
-extern "C" SO_EXPORT int exp_main(int argc, char **argv, bool const isExtended) {
+extern "C" SO_EXPORT int one_time_init_main(int argc, char **argv) {
   s_parent_thrd_pid = getpid();
-  volatile int exit_code = EXIT_SUCCESS;
   s_progpath = strdup(argv[0]);
   s_progname = [](const char * const path) -> const char* {
     auto const dup_path = strdupa(path);
@@ -180,31 +186,34 @@ extern "C" SO_EXPORT int exp_main(int argc, char **argv, bool const isExtended) 
   }(progpath());
   logger::set_progname(progname());
   logger::set_to_unbuffered();
-  log(LL::INFO, "starting process %d", getpid());
+  log(LL::INFO, "starting process %d", get_parent_pid());
   log(LL::DEBUG, "%d command-line arg(s),\n\tprogram path: \"%s\"\n\texecutable dir: \"%s\"",
-        argc - 1, progpath(), executable_dir());
-
+      argc - 1, progpath(), executable_dir());
   signal(SIGINT, signal_callback_handler);
-
-  // declare these as static storage
-  static string_view jlauncher_queue_name;
-  static string_view jsupervisor_queue_name;
-  // then initialize them as part of main() startup initialization execution
-  jlauncher_queue_name   = strdup(get_jlauncher_mq_queue_name(progname()).c_str());
-  jsupervisor_queue_name = strdup(get_jsupervisor_mq_queue_name(progname()).c_str());
+  s_jlauncher_queue_name   = strdup(get_jlauncher_mq_queue_name(progname()).c_str());
+  s_jsupervisor_queue_name = strdup(get_jsupervisor_mq_queue_name(progname()).c_str());
   // now also set these particular values into the send_mq_msg namespace subsystem of the spartan shared library
   send_mq_msg::set_progname(progname());
   // must set this property prior to using Java_spartan_LaunchProgram_invokeCommand()
   launch_program::set_progpath(progpath());
 
+  return forkable_entry_main(argc, argv, false);
+}
+
+enum class Operation : short { NONE, SERVICE, INVOKED_COMMAND, STATUS, STOP, COMMAND };
+using OP = Operation;
+
+extern "C" SO_EXPORT int forkable_entry_main(int argc, char **argv, const bool isExtended) {
+  volatile int exit_code = EXIT_SUCCESS;
+
   static auto const send_launcher_mq_msg = [](const char * const msg) -> int {
     if (flag != 0) return EXIT_SUCCESS; // flag when non-zero indicates was signaled to terminate
-    return send_mq_msg::send_mq_msg(msg, jlauncher_queue_name.c_str());
+    return send_mq_msg::send_mq_msg(msg, s_jlauncher_queue_name.c_str());
   };
 
   send_supervisor_mq_msg = [](const char * const msg) -> int {
     if (flag != 0) return EXIT_SUCCESS; // flag when non-zero indicates was signaled to terminate
-    return send_mq_msg::send_mq_msg(msg, jsupervisor_queue_name.c_str());
+    return send_mq_msg::send_mq_msg(msg, s_jsupervisor_queue_name.c_str());
   };
 
   // static lambda (with closure) that is now defined to send
@@ -341,10 +350,10 @@ extern "C" SO_EXPORT int exp_main(int argc, char **argv, bool const isExtended) 
             auto const mq_queue_name = [](cmds_set_t const &cs, cmd_t const &c) -> string_view {
               if (cs.count(c) > 0) {
                 log(LL::DEBUG, "running child processor command: %s", c.c_str());
-                return jlauncher_queue_name;
+                return s_jlauncher_queue_name;
               } else {
                 log(LL::DEBUG, "running supervisor command: %s", c.c_str());
-                return jsupervisor_queue_name;
+                return s_jsupervisor_queue_name;
               }
             }(cmds_set, command);
 

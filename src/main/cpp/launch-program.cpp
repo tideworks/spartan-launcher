@@ -305,7 +305,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
     throw fork_exception(format2str(err_msg_fmt, getpid(), strerror(errno)));
   } else if (pid == 0) {
     // is child process
-    auto rtn = exp_main(argc_dup, argv_dup, isExtended); // execute spartan main() through direct call stack
+    auto rtn = forkable_entry_main(argc_dup, argv_dup, isExtended); // execute spartan main() through direct call stack
     exit(rtn);
   }
 

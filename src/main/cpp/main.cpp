@@ -1,5 +1,5 @@
 #include "so-export.h"
 
 int main(int argc, char **argv) {
-  return exp_main(argc, argv, false);
+  return one_time_init_main(argc, argv);
 }
