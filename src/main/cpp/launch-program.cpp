@@ -30,7 +30,6 @@ limitations under the License.
 #include <sys/syscall.h>
 #include <cxxabi.h>
 #include <algorithm>
-#include "string-view.h"
 #include "session-state.h"
 #include "process-cmd-dispatch-info.h"
 #include "path-concat.h"
@@ -44,8 +43,6 @@ limitations under the License.
 using logger::log;
 using logger::LL;
 
-using bpstd::string_view;
-
 DECL_EXCEPTION(find_program_path)
 DECL_EXCEPTION(create_uds_socket)
 DECL_EXCEPTION(bind_uds_socket_name)
@@ -55,17 +52,11 @@ DECL_EXCEPTION(interrupted)
 
 static volatile bool termination_flag = false;
 
-// forward declaration
+// forward declarations
+extern const char* progpath();
 static std::string find_program_path(const char * const prog, const char * const path_var_name);
 
 namespace launch_program {
-  static string_view s_progpath;
-
-  // NOTE: this property must be set prior to using Java_spartan_LaunchProgram_invokeCommand()
-  void set_progpath(const char *const progpath) {
-    s_progpath = strdup(progpath);
-  }
-
   std::tuple<std::string, bool> try_resolve_program_path(const char * const prog, const char * const path_var_name) {
     try {
       return std::make_tuple(find_program_path(prog, path_var_name), true);
@@ -89,7 +80,7 @@ namespace launch_program {
     delete p;
   }
 
-  void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len) {
+  void init_sockaddr(string_view const uds_sock_name, sockaddr_un &addr, socklen_t &addr_len) {
     memset(&addr, 0, sizeof(sockaddr_un));
     addr.sun_family = AF_UNIX;
     auto const path_buf_end = sizeof(addr.sun_path) - 1;
@@ -110,9 +101,9 @@ namespace launch_program {
 
   std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd) {
     auto const progname = [](const char * const path) -> std::string {
-      char * const dup_path = strdupa(path);
+      auto dup_path = strdupa(path);
       return std::string(basename(dup_path));
-    }(s_progpath.c_str());
+    }(progpath());
 
     auto uds_socket_name = make_fifo_pipe_name(progname.c_str(), "JLauncher_UDS");
 
@@ -123,7 +114,7 @@ namespace launch_program {
 
     sockaddr_un server_address{0};
     socklen_t address_length;
-    init_sockaddr(uds_socket_name, server_address, address_length);
+    init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
     auto rc = bind(socket_fd_sp->fd, (const sockaddr*) &server_address, address_length);
     if (rc < 0) {
@@ -136,13 +127,13 @@ namespace launch_program {
   }
 
   std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> obtain_response_stream(
-      std::string const &uds_socket_name, fd_wrapper_sp_t socket_read_fd_sp)
+      string_view const uds_socket_name, fd_wrapper_sp_t socket_read_fd_sp)
   {
     static const char* const func_name = __FUNCTION__;
 
     sockaddr_un server_address{0};
     socklen_t address_length;
-    init_sockaddr(uds_socket_name, server_address, address_length);
+    init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
     pid_buffer_t pid_buffer{0};
     memset(&pid_buffer, 0, sizeof(pid_buffer));
@@ -168,7 +159,7 @@ namespace launch_program {
       throw obtain_rsp_stream_exception{ std::move(err_msg) };
     }
 
-    init_sockaddr(uds_socket_name, server_address, address_length);
+    init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
     msghdr client_recv_msg{nullptr};
     memset(&client_recv_msg, 0, sizeof(client_recv_msg));
@@ -225,8 +216,6 @@ namespace launch_program {
 
 using namespace launch_program;
 
-inline const char *progpath() { return launch_program::s_progpath.c_str(); }
-
 static std::string get_env_var(const char * const name) {
   char * const val = getenv(name);
   auto rtn_str( val != nullptr ? std::string(val) : std::string() );
@@ -271,8 +260,9 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
     int argc, char **argv, const char * const prog_path, bool const isExtended)
 {
   auto const argc_dup = argc + 1; // bump up by one for added -pipe= option
-  char **const argv_dup = (char **) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
-  argv_dup[0] = strdupa(prog_path); // file path of program to be spawned
+  auto const argv_dup = (char **) alloca((argc_dup + 1) * sizeof(argv[0])); // reserve nullptr entry at array end too
+  auto const argv_zero = strdupa(prog_path); // file path of program to be spawned
+  argv_dup[0] = argv_zero;
   argv_dup[1] = nullptr; // command line option conveys pipe file descriptors to spawned program
   for (int i = 2, j = 1; j < argc; i++, j++) {
     argv_dup[i] = argv[j];
@@ -281,7 +271,8 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
 
   auto uds_socket_name = make_fifo_pipe_name(progpath(), "JLauncher_UDS");
   auto const pipe_optn = format2str("-pipe=%s", uds_socket_name.c_str());
-  argv_dup[1] = strdupa(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
+  auto const argv_one = strdupa(pipe_optn.c_str()); // set -pipe=... as command line arg to spawned program
+  argv_dup[1] = argv_one;
   auto const subcmd = argv_dup[2];
 
   fd_wrapper_sp_t read_fd_sp = create_uds_socket([subcmd, &uds_socket_name](int err_no) -> std::string {
@@ -291,7 +282,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
 
   sockaddr_un server_address{0};
   socklen_t address_length;
-  init_sockaddr(uds_socket_name, server_address, address_length);
+  init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
   if (bind(read_fd_sp->fd, (const sockaddr *) &server_address, address_length) < 0) {
     const char err_msg_fmt[] = "failed binding parent unix uds %s socket for i/o to spawned program subcommand %s: %s";
@@ -305,7 +296,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
     throw fork_exception(format2str(err_msg_fmt, getpid(), strerror(errno)));
   } else if (pid == 0) {
     // is child process
-    auto rtn = forkable_entry_main(argc_dup, argv_dup, isExtended); // execute spartan main() through direct call stack
+    auto rtn = forkable_main_entry(argc_dup, argv_dup, isExtended); // execute spartan main() through direct call stack
     exit(rtn);
   }
 
@@ -333,7 +324,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
   pid_t const pid = std::get<0>(rslt);
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
 
-  auto rslt2 = obtain_response_stream(uds_socket_name, std::move(std::get<1>(rslt)));
+  auto rslt2 = obtain_response_stream(uds_socket_name.c_str(), std::move(std::get<1>(rslt)));
   pid_t const child_pid = std::get<0>(rslt2);
   fd_wrapper_sp_t child_read_fd_sp{ std::move(std::get<1>(rslt2)) };
 

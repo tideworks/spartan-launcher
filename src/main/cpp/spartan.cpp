@@ -61,6 +61,7 @@ static const string_view SHUTDOWN_CMD{ "--SHUTDOWN" };
 static const string_view STATUS_CMD{ "--STATUS" };
 static const string_view CHILD_PID_NOTIFY_CMD{ "--CHILD_PID_NOTIFY" };
 static const string_view CHILD_PID_COMPLETION_NOTIFY_CMD{ "--CHILD_PID_COMPLETION_NOTIFY" };
+static const string_view EXTENDED_INVOKE_CMD{ "--EXTENDED_INVOKE" };
 
 DECL_EXCEPTION(open_write_pipe)
 
@@ -68,7 +69,7 @@ static volatile sig_atomic_t flag = 0;
 void set_exit_flag_true() {
   flag = 1; // set flag
 }
-static void signal_callback_handler(int /*sig*/) { // can be called asynchronously
+static void signal_callback_handler(int /*sig*/) { // may be called asynchronously
   set_exit_flag_true();
 }
 
@@ -82,7 +83,7 @@ extern "C" void __assert (const char *__assertion, const char *__file, int __lin
 inline const char* get_env_var(const char * const name, const bool do_assert = false) noexcept {
   char *val = getenv(name);
   if (val == nullptr && do_assert) {
-    __assert("get_env_var() did not find expected environment variable to be defined", __FILE__, __LINE__);
+    __assert("getenv() did not find expected environment variable to be defined on startup", __FILE__, __LINE__);
   }
   return val != nullptr ? strdup(val) : "";
 }
@@ -91,18 +92,27 @@ static const char* get_executable_dir() noexcept {
   char strbuf[2048];
   auto n = readlink("/proc/self/exe", strbuf, sizeof(strbuf) - 1);
   if (n != -1) {
-    strbuf[n] = '\0';
+    strbuf[n] = '\0'; // make sure string is null terminated as C strings should be
+    const char *tmpstr = nullptr;
     try {
-      return strdup(static_cast<char *>(dirname(strbuf)));
+      tmpstr = static_cast<char*>(dirname(strbuf));
+      if (tmpstr == nullptr) {
+        __assert("dirname() could not parse extract executable's directory path on startup", __FILE__, __LINE__);
+      }
     } catch(...) {
-      __assert("dirname() threw exception attempting parse for directory of program", __FILE__, __LINE__);
+      __assert("dirname() threw exception parsing executable's directory path on startup", __FILE__, __LINE__);
     }
+    tmpstr = strdup(tmpstr);
+    if (tmpstr == nullptr) {
+      __assert("strdup() could not duplicate the executable's directory path on startup", __FILE__, __LINE__);
+    }
+    return tmpstr;
   }
   return ".";
 }
 
-static const string_view s_java_classpath{ get_env_var("CLASSPATH") };
-static const string_view s_java_home_path{ get_env_var("JAVA_HOME", true) };
+static const string_view s_java_classpath{ get_env_var("CLASSPATH") }; // optional
+static const string_view s_java_home_path{ get_env_var("JAVA_HOME", true) }; // must be defined
 static const string_view s_executable_dir{ get_executable_dir() };
 static string_view s_progpath;
 static string_view s_progname;
@@ -125,7 +135,7 @@ template<typename T>
 using defer_jstr_sp_t = std::unique_ptr<_jstring, T>;
 
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
-                                 send_mq_msg_cb_t send_mq_msg_cb);
+                                 send_mq_msg_cb_t &send_mq_msg_cb);
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp);
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor, fd_wrapper_sp_t rsp_fd,
                               int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr);
@@ -147,7 +157,7 @@ static int  invoke_child_process_action(sessionState& session_mut, const char *j
 static int  invoke_child_processor_command(int argc, char **argv, const char *const msg_arg,
                                            JavaVM *const jvmp, methodDescriptor method_descriptor);
 
-static auto const shmAllocatorCleanup = [](shm::ShmAllocator *p) {
+static auto const shm_allocator_cleanup = [](shm::ShmAllocator *p) {
   if (p != nullptr) {
     ::delete p;
 #ifdef _DEBUG
@@ -155,8 +165,8 @@ static auto const shmAllocatorCleanup = [](shm::ShmAllocator *p) {
 #endif
   }
 };
-using shmAllocatorCleanup_t = decltype(shmAllocatorCleanup);
-static std::unique_ptr<shm::ShmAllocator, shmAllocatorCleanup_t> spShmAlloctr(nullptr, shmAllocatorCleanup);
+using shm_allocator_sp_t = std::unique_ptr<shm::ShmAllocator, decltype(shm_allocator_cleanup)>;
+static shm_allocator_sp_t s_shm_allocator_sp(nullptr, shm_allocator_cleanup);
 
 static std::function<int(const char*)> send_supervisor_mq_msg{ [](const char * const msg)-> int{return EXIT_SUCCESS;} };
 static std::function<void(int)> quit_launcher_on_term_code{ [](int status_code){ _exit(status_code); } };
@@ -165,11 +175,9 @@ static std::function<void(int)> quit_supervisor_on_term_code{ [](int /*status_co
 static int s_parent_thrd_pid = 0;
 inline int get_parent_pid() { return s_parent_thrd_pid; }
 
-inline bool icompare_pred(unsigned char a, unsigned char b) {
-  return std::tolower(a) == std::tolower(b);
-}
+inline bool icompare_pred(unsigned char a, unsigned char b) noexcept { return std::tolower(a) == std::tolower(b); }
 
-bool icompare(const std::string &a, const std::string &b) {
+bool icompare(const std::string &a, const std::string &b) noexcept {
   if (a.length() == b.length()) {
     return std::equal(b.begin(), b.end(),
                       a.begin(), icompare_pred);
@@ -177,33 +185,62 @@ bool icompare(const std::string &a, const std::string &b) {
   return false;
 }
 
-extern "C" SO_EXPORT int one_time_init_main(int argc, char **argv) {
+extern "C" SO_EXPORT int one_time_init_main(int argc, char **argv)
+{
   s_parent_thrd_pid = getpid();
-  s_progpath = strdup(argv[0]);
-  s_progname = [](const char * const path) -> const char* {
-    auto const dup_path = strdupa(path);
-    return strdup(basename(dup_path));
-  }(progpath());
+
+  const char *tmpstr = nullptr;
+
+  {
+    tmpstr = strdup(argv[0]);
+    if (tmpstr == nullptr) {
+      __assert("strdup() could not duplicate program full path name on startup", __FILE__, __LINE__);
+    }
+    s_progpath = tmpstr;
+  }
+
+  {
+    tmpstr = [](const char* const path) -> const char* {
+      auto const dup_path = strdupa(path);
+      return strdup(basename(dup_path));
+    }(progpath());
+    if (tmpstr == nullptr) {
+      __assert("strdup() could not duplicate program base name on startup", __FILE__, __LINE__);
+    }
+    s_progname = tmpstr;
+  }
+
   logger::set_progname(progname());
   logger::set_to_unbuffered();
   log(LL::INFO, "starting process %d", get_parent_pid());
   log(LL::DEBUG, "%d command-line arg(s),\n\tprogram path: \"%s\"\n\texecutable dir: \"%s\"",
       argc - 1, progpath(), executable_dir());
-  signal(SIGINT, signal_callback_handler);
-  s_jlauncher_queue_name   = strdup(get_jlauncher_mq_queue_name(progname()).c_str());
-  s_jsupervisor_queue_name = strdup(get_jsupervisor_mq_queue_name(progname()).c_str());
-  // now also set these particular values into the send_mq_msg namespace subsystem of the spartan shared library
-  send_mq_msg::set_progname(progname());
-  // must set this property prior to using Java_spartan_LaunchProgram_invokeCommand()
-  launch_program::set_progpath(progpath());
 
-  return forkable_entry_main(argc, argv, false);
+  signal(SIGINT, signal_callback_handler);
+
+  {
+    tmpstr = strdup(get_jlauncher_mq_queue_name(progname()).c_str());
+    if (tmpstr == nullptr) {
+      __assert("strdup() could not duplicate jlauncher_mq_queue_name on startup", __FILE__, __LINE__);
+    }
+    s_jlauncher_queue_name = tmpstr;
+  }
+
+  {
+    tmpstr = strdup(get_jsupervisor_mq_queue_name(progname()).c_str());
+    if (tmpstr == nullptr) {
+      __assert("strdup() could not duplicate s_jsupervisor_queue_name on startup", __FILE__, __LINE__);
+    }
+    s_jsupervisor_queue_name = tmpstr;
+  }
+
+  return forkable_main_entry(argc, argv, false);
 }
 
 enum class Operation : short { NONE, SERVICE, INVOKED_COMMAND, STATUS, STOP, COMMAND };
 using OP = Operation;
 
-extern "C" SO_EXPORT int forkable_entry_main(int argc, char **argv, const bool isExtended) {
+extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool is_extended_invoke) {
   volatile int exit_code = EXIT_SUCCESS;
 
   static auto const send_launcher_mq_msg = [](const char * const msg) -> int {
@@ -230,9 +267,14 @@ extern "C" SO_EXPORT int forkable_entry_main(int argc, char **argv, const bool i
     send_launcher_mq_msg(STOP_CMD.c_str());
   };
 
-  auto const send_flattened_argv_msg = [argc,argv](const char * const uds_socket_name, const char * const queue_name,
-                                                   send_mq_msg::str_array_filter_cb_t filter) -> int {
-      return send_mq_msg::send_flattened_argv_mq_msg(argc, argv, uds_socket_name, queue_name, filter);
+  auto const send_flattened_argv_msg = [argc, argv, is_extended_invoke](const char *const uds_socket_name,
+                                                                        const char *const queue_name,
+                                                                        send_mq_msg::str_array_filter_cb_t filter)-> int
+  {
+    std::string extended_invoke_cmd{ EXTENDED_INVOKE_CMD.c_str() };
+    extended_invoke_cmd += is_extended_invoke ? "=true" : "=false";
+    return send_mq_msg::send_flattened_argv_mq_msg(argc, argv, uds_socket_name, extended_invoke_cmd.c_str(), queue_name,
+                                                   filter);
   };
 
   if (argc > 1) {
@@ -387,10 +429,9 @@ extern "C" SO_EXPORT int forkable_entry_main(int argc, char **argv, const bool i
                       });
             // command line was posted as message to be processed, now
             // proceed to handle the response output stream appropriately
-            if (exit_code == EXIT_SUCCESS) {
-              if (uds_socket_name_arg.empty()) {
-                exit_code = stdout_echo_response_stream(uds_socket_name, std::move(socket_read_fd_sp));
-              }
+            if (exit_code == EXIT_SUCCESS && uds_socket_name_arg.empty()) {
+              // there is no caller of Spartan.InvokeCommand() APIs so handle response stream right here
+              exit_code = stdout_echo_response_stream(uds_socket_name, std::move(socket_read_fd_sp));
             }
             break;
           }
@@ -421,19 +462,19 @@ extern "C" SO_EXPORT int forkable_entry_main(int argc, char **argv, const bool i
   _exit(exit_code); // do not change this to simple return - avoids side effect with Java JVM (per g++ 7.2.1)
 }
 
-static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cstr, int &rc) {
+static fd_wrapper_sp_t open_write_anon_pipe(const char* const uds_socket_name_cstr, int &rc,
+                                            const bool is_extended_invoke = false)
+{
   static const char* const func_name = __FUNCTION__;
   rc = EXIT_SUCCESS;
 
-  std::string const uds_socket_name{ uds_socket_name_cstr };
+  string_view const uds_socket_name{ uds_socket_name_cstr };
 
-  int line_nbr = 0;
-  auto const handle_create_uds_socket_error = [&uds_socket_name, &line_nbr](int err_no) -> std::string {
+  int line_nbr = __LINE__ + 1;
+  auto socket_fd_sp = create_uds_socket([&uds_socket_name, &line_nbr](int err_no) -> std::string {
     const char err_msg_fmt[] = "%d: %s() -> create_uds_socket(): failed creating uds socket for use with name %s:\n\t%s";
     return format2str(err_msg_fmt, line_nbr, func_name, uds_socket_name.c_str(), strerror(err_no));
-  };
-  line_nbr = __LINE__ + 1;
-  auto socket_fd_sp = create_uds_socket(std::move(handle_create_uds_socket_error));
+  });
 
   enum PIPES : short { READ = 0, WRITE = 1 };
 
@@ -448,7 +489,7 @@ static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cs
   fd_wrapper_sp_t rd_pipe_sp{ &rd_pipe, &fd_cleanup_no_delete };
   fd_wrapper_sp_t wr_pipe_sp{ new fd_wrapper_t{ pipes[PIPES::WRITE], uds_socket_name.c_str() }, &fd_cleanup_with_delete };
 
-  sockaddr_un server_address;
+  sockaddr_un server_address{0};
   socklen_t address_length;
   init_sockaddr(uds_socket_name, server_address, address_length);
 
@@ -470,13 +511,13 @@ static fd_wrapper_sp_t open_write_anon_pipe(const char *const uds_socket_name_cs
   log(LL::DEBUG, "%s(): ***** sent process pid{%d} datagram via named socket %s *****\n",
       func_name, pid_buffer.pid, uds_socket_name.c_str());
 
-  init_sockaddr(uds_socket_name, server_address, address_length);
+  init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
-  msghdr parent_msg;
+  msghdr parent_msg{nullptr};
   memset(&parent_msg, 0, sizeof(parent_msg));
   parent_msg.msg_name = &server_address;
   parent_msg.msg_namelen = address_length;
-  pipe_fds_buffer_t cmsg_payload; //{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rd_pipe_sp->fd } };
+  pipe_fds_buffer_t cmsg_payload{0}; //{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rd_pipe_sp->fd } };
   memset(&cmsg_payload, 0, sizeof(cmsg_payload));
   cmsg_payload.cmsg.cmsg_len = 0;
   cmsg_payload.cmsg.cmsg_level = SOL_SOCKET;
@@ -518,10 +559,10 @@ static void supervisor_status_response(std::string uds_socket_name, JavaVM * con
 // Issues -STATUS request command to parent supervisor - result is written
 // to an anonymous output pipe, which is written to stdout by requester process
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
-                                 send_mq_msg_cb_t send_mq_msg_cb)
+                                 send_mq_msg_cb_t &send_mq_msg_cb)
 {
   int strbuf_size = 256;
-  char *strbuf = (char*) alloca(strbuf_size);
+  auto strbuf = (char*) alloca(strbuf_size);
 
   int n = strbuf_size;
   do_msg_fmt: {
@@ -542,7 +583,7 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
 }
 
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp) {
-  auto rslt = obtain_response_stream(uds_socket_name, std::move(read_fd_sp));
+  auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
   fd_wrapper_sp_t fd_sp{ std::move(std::get<1>(rslt)) };
   auto const fd = fd_sp->fd;
 
@@ -562,12 +603,11 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
         handle_fd_error(errno);
         return EXIT_FAILURE;
       }
-      else if (n <= 0) {
+      if (n <= 0) {
         fflush(out_stream);
         break;
-      } else {
-        n_read += n;
       }
+      n_read += n;
       const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
       if (nw > 0) {
         n_writ += nw;
@@ -760,7 +800,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
         if (!was_exception_raised) {
           cmd_dsp::CmdDispatchInfoProcessor processCDI(env, class_name, method_name, jcls, ss);
           auto pshm = processCDI.process_initial_cmd_dispatch_info(reinterpret_cast<jbyteArray>(ser_cmd_dispatch_info));
-          spShmAlloctr.reset(pshm);
+          s_shm_allocator_sp.reset(pshm);
         }
       } else if (which_method == WM::MAIN) {
         // invoke the static method main() entry point
@@ -1081,7 +1121,7 @@ static int supervisor(int argc, char **argv, sessionState& session) {
                                           "()[B",
                                           true, WM::GET_CMD_DISPATCH_INFO);
           auto rc = invoke_java_method(jvm, &obtainSerializedAnnotationInfo, argc, argv, &session_param);
-          std::unique_ptr<shm::ShmAllocator, shmAllocatorCleanup_t> sp_shm_alloc = std::move(spShmAlloctr);
+          shm_allocator_sp_t sp_shm_alloc = std::move(s_shm_allocator_sp);
           if (rc != EXIT_SUCCESS) {
             prom_rref.set_value(); // Send notification to waiting caller thread to proceed
             return rc;
@@ -1649,7 +1689,7 @@ static raii_argv_sp_t parse_cmd_line(const char *const cmd_line, const char *con
 }
 
 static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const msg_arg,
-                               JavaVM *const jvmp, methodDescriptor method_descriptor,
+                               JavaVM *const jvmp, methodDescriptor &method_descriptor,
                                const char *const func_name, const char *const desc)
 {
   const auto pid = getpid();

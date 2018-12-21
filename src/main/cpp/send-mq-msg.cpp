@@ -22,7 +22,6 @@ limitations under the License.
 #include <memory>
 #include <cassert>
 #include <sys/stat.h>
-#include "string-view.h"
 #include "log.h"
 #include "send-mq-msg.h"
 
@@ -36,19 +35,29 @@ limitations under the License.
 using logger::log;
 using logger::LL;
 
-using bpstd::string_view;
-
 namespace send_mq_msg {
-  static string_view s_progname;
-  inline const char *progname() noexcept { return s_progname.c_str(); }
-
-  // NOTE: this property must be set on the send_mq_msg namespace subsystem prior to use of its functions
-  void set_progname(const char *const progname) {
-    s_progname = strdup(progname);
-  }
-
-  // wraps call to OS API of same name - sets umask prior to call and then restores umask
-  mqd_t mq_open_ex(const char *name, int oflag, mode_t mode, struct mq_attr *attr) {
+  /**
+   * Wraps call to OS API of mq_open() - sets umask prior to call and then restores umask.
+   *
+   * Establishes connection between a process and a message queue NAME and returns message
+   * queue descriptor or (mqd_t) -1 on error.
+   *
+   * OFLAG determines the type of access used.
+   *
+   * If O_CREAT is on OFLAG, the third argument is taken as a 'mode_t' - the mode of the
+   * created message queue.
+   *
+   * The fourth argument is taken as 'struct mq_attr *', pointer to message queue attributes.
+   *
+   * If the fourth argument is NULL, default attributes are used.
+   *
+   * @param name name of the queue to open
+   * @param oflag access flags
+   * @param mode mode of the queue to be opened
+   * @param attr pointer to structure for attributes for the opened queue (may be null to accept defaults)
+   * @return queue descriptor or -1 on error
+   */
+  mqd_t mq_open_ex(const char* const name, int oflag, mode_t mode, struct mq_attr *attr) {
     const mode_t save_umask = umask(002); // coerce a default umask value for this call
     const mqd_t mqd = ::mq_open(name, oflag, mode, attr); // call the OS API now
     umask(save_umask);
@@ -68,19 +77,25 @@ namespace send_mq_msg {
   }
 #endif
 
-  // The core function for sending a message to a specified mq queue; does
-  // appropriate return code error checking, prints errors to stderr output
-  // if detected, returns EXIT_SUCCESS on success or otherwise EXIT_FAILURE.
-  int send_mq_msg(const char *const msg, const char *const queue_name) {
-    log(LL::DEBUG, "%s() called:\n\tmsg: %s\n\tque: %s", __func__, msg, queue_name);
+  /**
+   * The core function for sending a message to a specified mq queue; does appropriate
+   * return code error checking, prints errors to stderr output if detected, returns
+   * EXIT_SUCCESS on success or otherwise EXIT_FAILURE.
+   *
+   * @param msg message text to be sent
+   * @param queue_name name of target queue to publish to
+   * @return a result of zero indicates message was successfully published to target queue
+   */
+  int send_mq_msg(string_view const msg, string_view const queue_name) {
+    log(LL::DEBUG, "%s() called:\n\tmsg: %s\n\tque: %s", __func__, msg, queue_name.c_str());
     struct {
       const mqd_t mqd;
     }
-        wrp_mqd = {send_mq_msg::mq_open_ex(queue_name, O_WRONLY, 0662, NULL)};
+        wrp_mqd = {send_mq_msg::mq_open_ex(queue_name.c_str(), O_WRONLY, 0662, NULL)};
     using wrp_mqd_t = decltype(wrp_mqd);
     if (wrp_mqd.mqd == -1) {
       const auto rc = errno;
-      log(LL::ERR, "mq_open_ex(\"%s\") failed: %s; (try starting service first)", queue_name, strerror(rc));
+      log(LL::ERR, "mq_open_ex(\"%s\") failed: %s; (try starting service first)", queue_name.c_str(), strerror(rc));
 #if DBG_STK_TRC
       if (rc == EMFILE) {
         show_stackframe(EXIT_FAILURE);
@@ -94,22 +109,37 @@ namespace send_mq_msg {
       }
     };
     std::unique_ptr<decltype(wrp_mqd), decltype(close_mqd)> mqd_sp(&wrp_mqd, close_mqd);
-    if (mq_send(mqd_sp->mqd, msg, strlen(msg), 0) != 0) {
-      log(LL::ERR, "mq_send() on queue \"%s\" failed: %s", queue_name, strerror(errno));
+    if (mq_send(mqd_sp->mqd, msg.c_str(), msg.size(), 0) != 0) {
+      log(LL::ERR, "mq_send() on queue \"%s\" failed: %s", queue_name.c_str(), strerror(errno));
       return EXIT_FAILURE;
     }
     return EXIT_SUCCESS;
   }
 
-// Put the argv args into a flattened string - double quote each arg then
-// send as a message to the parent supervisor process. If the fifo_pipe_name
-// parameter is not null, then it becomes the first argv argument (index zero).
-  int send_flattened_argv_mq_msg(int argc, char **argv, const char *const fifo_pipe_name,
-                                           const char *const queue_name, str_array_filter_cb_t filter) {
+  /**
+   * Put the argv args into a flattened string - double quote each arg then send
+   * as a message to a target queue (supervisor or child process launcher).
+   *
+   * The uds_socket_name parameter becomes the first argv argument (index zero).
+   *
+   * The extended_invoke_cmd parameter becomes the second argv argument (index one).
+   *
+   * @param argc number of string arguments in argv array (not counting last null entry)
+   * @param argv array of string arguments - the last entry in the array is a null entry
+   * @param uds_socket_name name of the unix datagram to be used to marshal anonymous pipe(s) back to the caller
+   * @param extended_invoke_cmd a command option that informs (true or false) if is an extended style of invoke command
+   * @param queue_name name of the message queue to publish flattened string to (supervisor or child)
+   * @param filter a call-back that can filter out any command line arguments that should not be present
+   * @return a result of zero indicates the flattened string was successfully published to the named queue
+   */
+  int send_flattened_argv_mq_msg(int argc, char **argv, string_view const uds_socket_name,
+                                 string_view const extended_invoke_cmd, string_view const queue_name,
+                                 str_array_filter_cb_t filter)
+  {
     // duplicate the argv array into temp stack memory array, argv_dup
     auto const argv_dup = (char**) alloca((argc + 1) * sizeof(argv[0]));
     argv_dup[argc] = nullptr; // argv convention is that there is a nullptr sentinel element at end of the array
-    argv_dup[0] = const_cast<char *>(fifo_pipe_name);
+    argv_dup[0] = const_cast<char *>(uds_socket_name.c_str());
     for (int i = 1; i < argc; i++) {
       argv_dup[i] = argv[i];
     }
@@ -145,6 +175,6 @@ namespace send_mq_msg {
     *(--bufpos) = null_ch; // replace last space char with null
     log(LL::DEBUG, "%s(): inform service to process:\n\t\'%s\'", __func__, buf);
     // now send the string buffer to the parent supervisor process
-    return send_mq_msg::send_mq_msg(buf, queue_name);
+    return send_mq_msg::send_mq_msg(buf, queue_name.c_str());
   }
 }

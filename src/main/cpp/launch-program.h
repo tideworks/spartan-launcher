@@ -19,13 +19,15 @@ limitations under the License.
 #ifndef __LAUNCH_PROGRAM_H__
 #define __LAUNCH_PROGRAM_H__
 
+#include "string-view.h"
 #include <string>
 #include <sys/un.h>
 #include <sys/socket.h>
 
 namespace launch_program {
-  // NOTE: this property must be set prior to using Java_spartan_LaunchProgram_invokeCommand()
-  void set_progpath(const char *const progpath);
+
+  using bpstd::string_view;
+
   std::tuple<std::string, bool> try_resolve_program_path(const char * const prog, const char * const path_var_name);
 
   // RAII-related declarations for managing file/pipe descriptors (to clean these up if exception thrown)
@@ -62,11 +64,11 @@ namespace launch_program {
     } p;
   };
 
-  void init_sockaddr(std::string const &uds_sock_name, sockaddr_un &addr, socklen_t &addr_len);
+  void init_sockaddr(string_view const uds_sock_name, sockaddr_un &addr, socklen_t &addr_len);
   fd_wrapper_sp_t create_uds_socket(std::function<std::string(int)> get_errmsg);
   std::tuple<fd_wrapper_sp_t, std::string> bind_uds_socket_name(const char* const sub_cmd);
   std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> obtain_response_stream(
-      std::string const &uds_socket_name, fd_wrapper_sp_t socket_read_fd_sp);
+      string_view const uds_socket_name, fd_wrapper_sp_t socket_read_fd_sp);
 }
 
 #endif //__LAUNCH_PROGRAM_H__

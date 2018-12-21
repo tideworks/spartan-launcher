@@ -32,6 +32,6 @@ limitations under the License.
 #endif
 
 extern "C" SO_EXPORT int one_time_init_main(int argc, char **argv);
-extern "C" SO_EXPORT int forkable_entry_main(int argc, char **argv, const bool isExtended);
+extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool is_extended_invoke);
 
 #endif /* __SO_EXPORT_H__ */
