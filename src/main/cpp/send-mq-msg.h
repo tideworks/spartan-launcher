@@ -64,20 +64,22 @@ namespace send_mq_msg {
 
   /**
    * Put the argv args into a flattened string - double quote each arg then send
-   * as a message to the parent supervisor process.
+   * as a message to a target queue (supervisor or child process launcher).
    *
-   * If the uds_socket_name parameter is not null, then it becomes the first argv
-   * argument (index zero).
+   * The extended_invoke_cmd parameter becomes the second argv argument (index zero).
+   *
+   * The uds_socket_name parameter becomes the first argv argument (index one).
+   *
    * @param argc number of string arguments in argv array (not counting last null entry)
-   * @param argv array of string arguments - the last entry in the array is a null entry
-   * @param uds_socket_name name of the unix datagram to be used to marshal anonymous pipe(s) over
+   * @param argv array of string arguments - the last entry in the array is a null entry, indexed directly by argc
    * @param extended_invoke_cmd a command option that informs (true or false) if is an extended style of invoke command
+   * @param uds_socket_name name of the unix datagram to be used to marshal anonymous pipe(s) back to the caller
    * @param queue_name name of the message queue to publish flattened string to (supervisor or child)
    * @param filter a call-back that can filter out any command line arguments that should not be present
    * @return a result of zero indicates the flattened string was successfully published to the named queue
    */
-  int send_flattened_argv_mq_msg(int argc, char **argv, string_view const uds_socket_name,
-                                 string_view const extended_invoke_cmd, string_view const queue_name,
+  int send_flattened_argv_mq_msg(int argc, char **argv, string_view const extended_invoke_cmd,
+                                 string_view const uds_socket_name, string_view const queue_name,
                                  str_array_filter_cb_t filter);
 }
 #endif //__SEND_MQ_MSG_H__

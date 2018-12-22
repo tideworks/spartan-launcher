@@ -138,11 +138,14 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
                                  send_mq_msg_cb_t &send_mq_msg_cb);
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp);
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor, fd_wrapper_sp_t rsp_fd,
-                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr);
+                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr,
+                              const bool is_extended_invoke = false);
 inline int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
-                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr)
+                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr,
+                              const bool is_extended_invoke = false)
 {
-  return invoke_java_method(jvmp, method_descriptor, fd_wrapper_sp_t{nullptr, [](fd_wrapper_t *) {}}, argc, argv, pss);
+  return invoke_java_method(jvmp, method_descriptor, fd_wrapper_sp_t{nullptr, [](fd_wrapper_t *) {}}, argc, argv, pss,
+                            is_extended_invoke);
 }
 static int  supervisor(int argc, char **argv, sessionState& session);
 static void supervisor_child_processor_notify(const pid_t child_pid, const char * const command_line);
@@ -152,10 +155,10 @@ static int  invoke_java_child_processor_notify(const char * const child_pid, con
 static int  invoke_java_child_processor_completion_notify(const char * const child_pid,
                                                           JavaVM * const jvmp, methodDescriptor method_descriptor);
 static int  invoke_java_supervisor_command(int /*argc*/, char **/*argv*/, const char *const msg_arg, JavaVM *const jvmp,
-                                           methodDescriptor method_descriptor);
+                                           const methodDescriptor &method_descriptor);
 static int  invoke_child_process_action(sessionState& session_mut, const char *jvm_override_optns, action_cb_t action);
 static int  invoke_child_processor_command(int argc, char **argv, const char *const msg_arg,
-                                           JavaVM *const jvmp, methodDescriptor method_descriptor);
+                                           JavaVM *const jvmp, const methodDescriptor &method_descriptor);
 
 static auto const shm_allocator_cleanup = [](shm::ShmAllocator *p) {
   if (p != nullptr) {
@@ -267,14 +270,14 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
     send_launcher_mq_msg(STOP_CMD.c_str());
   };
 
-  auto const send_flattened_argv_msg = [argc, argv, is_extended_invoke](const char *const uds_socket_name,
-                                                                        const char *const queue_name,
+  auto const send_flattened_argv_msg = [argc, argv, is_extended_invoke](string_view const uds_socket_name,
+                                                                        string_view const queue_name,
                                                                         send_mq_msg::str_array_filter_cb_t filter)-> int
   {
     std::string extended_invoke_cmd{ EXTENDED_INVOKE_CMD.c_str() };
     extended_invoke_cmd += is_extended_invoke ? "=true" : "=false";
-    return send_mq_msg::send_flattened_argv_mq_msg(argc, argv, uds_socket_name, extended_invoke_cmd.c_str(), queue_name,
-                                                   filter);
+    return send_mq_msg::send_flattened_argv_mq_msg(argc, argv, {extended_invoke_cmd.c_str(),extended_invoke_cmd.size()},
+                                                   uds_socket_name, queue_name, std::move(filter));
   };
 
   if (argc > 1) {
@@ -393,10 +396,9 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
               if (cs.count(c) > 0) {
                 log(LL::DEBUG, "running child processor command: %s", c.c_str());
                 return s_jlauncher_queue_name;
-              } else {
-                log(LL::DEBUG, "running supervisor command: %s", c.c_str());
-                return s_jsupervisor_queue_name;
               }
+              log(LL::DEBUG, "running supervisor command: %s", c.c_str());
+              return s_jsupervisor_queue_name;
             }(cmds_set, command);
 
             // All other command line options ("option_name ...") will
@@ -414,19 +416,23 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
             } else {
               uds_socket_name = uds_socket_name_arg;
             }
-            exit_code = send_flattened_argv_msg(uds_socket_name.c_str(), mq_queue_name.c_str(),
-                      [](int &_argc_ref, char *_argv[]) -> void {
-                        for(int n = 0; n < _argc_ref; n++) {
-                          auto argv_item = _argv[n];
-                          if (*argv_item == '-' && strncasecmp(++argv_item, pipe_optn.c_str(), pipe_optn.size()) == 0) {
-                            for(int j = n; j < _argc_ref; j++) {
-                              _argv[j] = _argv[j + 1];
-                            }
-                            _argc_ref--;
-                            return;
-                          }
+            exit_code = send_flattened_argv_msg(
+                {uds_socket_name.c_str(), uds_socket_name.size()},
+                {mq_queue_name.c_str(), mq_queue_name.size()},
+                [](int &_argc_ref, char *_argv[]) -> void {
+                  for (int j = 0; j < _argc_ref; j++) {
+                    auto argv_item = _argv[j];
+                    if (argv_item != nullptr) {
+                      if (*argv_item == '-' && strncasecmp(++argv_item, pipe_optn.c_str(), pipe_optn.size()) == 0) {
+                        for (int k = j; k < _argc_ref; k++) {
+                          _argv[k] = _argv[k + 1]; // last entry or the argv array is a nullptr sentinel entry
                         }
-                      });
+                        _argc_ref--; // reduce the argc count for the entry just removed
+                        return;
+                      }
+                    }
+                  }
+                });
             // command line was posted as message to be processed, now
             // proceed to handle the response output stream appropriately
             if (exit_code == EXIT_SUCCESS && uds_socket_name_arg.empty()) {
@@ -644,7 +650,7 @@ inline int jni_detach_thread(JavaVM * const jvmp, JNIEnv * const envp) {
 
 // utility function that invokes a Java method
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor, fd_wrapper_sp_t rsp_fd,
-                              int argc, char **argv, const sessionState *pss)
+                              int argc, char **argv, const sessionState *pss, const bool is_extended_invoke)
 {
   int ret = EXIT_SUCCESS;
   auto const detach_thread = [jvmp,&ret](JNIEnv *envp) {
@@ -1262,12 +1268,13 @@ try_again:
     get_rnd_nbr(1, 99); // jiggle the random number seed value (each forked child gets different seed)
 
     const std::string msg_str(msg);
-    const std::string cmd = [](const char * const msg_cstr) -> std::string {
-      const char * const msg_dup = strdupa(msg_cstr);
+    std::string cmd = [](const char * const msg_cstr) -> std::string {
+      auto const msg_dup = strdupa(msg_cstr);
       static const char * const delim = " ";
       char *save = nullptr;
-      strtok_r(const_cast<char*>(msg_dup), delim, &save);
-      std::string cmd_str(strtok_r(nullptr, delim, &save));
+      strtok_r(msg_dup, delim, &save); // 1st arg - extended-invoke-command (skipping it)
+      strtok_r(nullptr, delim, &save); // 2nd arg - unix datagram name (skipping it)
+      std::string cmd_str(strtok_r(nullptr, delim, &save)); // 3rd arg is sub-command token
       cmd_str.erase(std::remove(cmd_str.begin(), cmd_str.end(), '"'), cmd_str.end());
       return cmd_str;
     }(msg);
@@ -1319,10 +1326,9 @@ try_again:
         if (pMethDesc != nullptr && !pMethDesc->empty()) {
           // call the standard entry point for child commands
           return invoke_child_processor_command(argc, argv, cmsg, jvm, *pMethDesc);
-        } else {
-          log(LL::ERR, "%s(): no Java method defined to handle command line:\n\t'%s'", func_name, cmsg);
-          return EXIT_FAILURE;
         }
+        log(LL::ERR, "%s(): no Java method defined to handle command line:\n\t'%s'", func_name, cmsg);
+        return EXIT_FAILURE;
       };
 
       // invoke the processing logic of the forked child process and return its exit code
@@ -1338,11 +1344,11 @@ try_again:
   {
     static const char func_name[] = "handle_supervisor_msg";
     child_process_count--;
-    const char * const msg_dup = strdupa(msg); // create a local copy of string that can be mutated
+    auto const msg_dup = strdupa(msg); // create a local copy of string that can be mutated
 
     static const char * const delim = " "; // space character
     char *save = nullptr;
-    const char * const cmd = strtok_r(const_cast<char*>(msg_dup), delim, &save);
+    const char * const cmd = strtok_r(msg_dup, delim, &save); // 1st arg
 
     if (strncmp(cmd, CHILD_PID_NOTIFY_CMD.c_str(), CHILD_PID_NOTIFY_CMD.size()) == 0) {
       // notify supervisor of a child process that was forked
@@ -1381,22 +1387,24 @@ try_again:
       }
     } else {
       log(LL::DEBUG, "%s(): '%s'", func_name, msg);
-      const char * const cmd_token = strtok_r(nullptr, delim, &save);
-      std::string cmd_str("");
+      strtok_r(nullptr, delim, &save);                          // 2nd arg - unix datagram name (skip it)
+      const char *cmd_token = strtok_r(nullptr, delim, &save);  // 3rd arg - sub-command name
+      std::string cmd_str{};
       if (cmd_token != nullptr) {
         cmd_str = cmd_token;
         cmd_str.erase(std::remove(cmd_str.begin(), cmd_str.end(), '"'), cmd_str.end());
+        cmd_token = cmd_str.c_str();
       }
-      auto const check_errcode = [&cmd_str](int errcode) {
+      auto const check_errcode = [cmd_token](int errcode) {
         if (errcode != EXIT_SUCCESS) {
-          log(LL::ERR, "invoke_java_supervisor_command() did not complete command %s successfully", cmd_str.c_str());
+          log(LL::ERR, "invoke_java_supervisor_command() did not complete command %s successfully", cmd_token);
         }
       };
       int ec;
       if (cmd_token != nullptr && shm_session.spSpartanSupervisorCommands) {
         log(LL::TRACE, "@@@@ pid(%d): use shm_session to invoke supervisor command: %s\n\tsupervisor cmd vec size: %lu",
                getpid(), cmd_str.c_str(), shm_session.spSpartanSupervisorCommands->size());
-        for (auto &methDesc : *shm_session.spSpartanSupervisorCommands) {
+        for (auto &methDesc : *(shm_session.spSpartanSupervisorCommands)) {
           if (icompare(methDesc.cmd_str(), cmd_str)) {
             ec = invoke_java_supervisor_command(argc, argv, msg, shm_session.jvm_sp.get(), methDesc);
             check_errcode(ec);
@@ -1688,8 +1696,20 @@ static raii_argv_sp_t parse_cmd_line(const char *const cmd_line, const char *con
   }};
 }
 
+static bool parse_extended_invoke_option(string_view const extended_invoke_cmd) {
+  if (strncmp(extended_invoke_cmd.c_str(), EXTENDED_INVOKE_CMD.c_str(), EXTENDED_INVOKE_CMD.size()) == 0) {
+    auto const str = strndupa(extended_invoke_cmd.c_str(), extended_invoke_cmd.size());
+    const auto delim = "=";
+    char *saveptr = nullptr;
+    strtok_r(str, delim, &saveptr); // skip 1st token
+    auto const val = strtok_r(nullptr, delim, &saveptr);
+    return strcmp(val, "true") == 0;
+  }
+  return false;
+}
+
 static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const msg_arg,
-                               JavaVM *const jvmp, methodDescriptor &method_descriptor,
+                               JavaVM *const jvmp, const methodDescriptor &method_descriptor,
                                const char *const func_name, const char *const desc)
 {
   const auto pid = getpid();
@@ -1701,16 +1721,18 @@ static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const 
   auto raii_argv_sp = parse_cmd_line(msg_arg, desc, argc_cmd_line, rc);
   if (rc == EXIT_SUCCESS) {
     auto const argv_cmd_line = raii_argv_sp.get();
-    if (argc_cmd_line <= 1) {
+    if (argc_cmd_line <= 3) {
       log(LL::ERR, "%s() %s %d unexpected error - invalid command line - insufficient arguments:\n\t'%s'",
           func_name, desc, getpid(), msg_arg);
       rc = EXIT_FAILURE;
     } else {
-      auto const uds_socket_name = argv_cmd_line[0]; // by convention first arg must be unix datagram name
+      auto const extd_invoke_cmd = argv_cmd_line[0]; // by convention first arg must be extended-invoke-command
+      auto const uds_socket_name = argv_cmd_line[1]; // by convention second arg must be unix datagram name
       auto fd_sp = open_write_anon_pipe(uds_socket_name, rc);
       if (rc == EXIT_SUCCESS) {
+        const auto is_extended_invoke = parse_extended_invoke_option(extd_invoke_cmd);
         rc = invoke_java_method(jvmp, &method_descriptor, std::move(fd_sp),
-                                argc_cmd_line, const_cast<char**>(argv_cmd_line));
+                                argc_cmd_line - 1, const_cast<char**>(&argv_cmd_line[1]), nullptr, is_extended_invoke);
       }
     }
   }
@@ -1719,15 +1741,15 @@ static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const 
   return rc;
 }
 
-static int invoke_java_supervisor_command(int argc, char **argv, const char *const msg_arg, JavaVM *const jvmp,
-                                          methodDescriptor method_descriptor)
+static int invoke_java_supervisor_command(int argc, char **argv, const char* const msg_arg, JavaVM* const jvmp,
+                                          const methodDescriptor &method_descriptor)
 {
   return core_invoke_command(argc, argv, msg_arg, jvmp, method_descriptor, __func__, "supervisor process");
 }
 
 // function where primary processing logic of forked child process initiates
-static int invoke_child_processor_command(int argc, char **argv, const char *const msg_arg, JavaVM *const jvmp,
-                                          methodDescriptor method_descriptor)
+static int invoke_child_processor_command(int argc, char **argv, const char* const msg_arg, JavaVM* const jvmp,
+                                          const methodDescriptor &method_descriptor)
 {
   return core_invoke_command(argc, argv, msg_arg, jvmp, method_descriptor, __func__, "child process");
 }
