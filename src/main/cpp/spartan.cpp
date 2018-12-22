@@ -137,15 +137,16 @@ using defer_jstr_sp_t = std::unique_ptr<_jstring, T>;
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
                                  send_mq_msg_cb_t &send_mq_msg_cb);
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp);
-static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor, fd_wrapper_sp_t rsp_fd,
-                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr,
-                              const bool is_extended_invoke = false);
+static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
+                              std::array<fd_wrapper_sp_t, 3> fds_array,
+                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr);
 inline int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
-                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr,
-                              const bool is_extended_invoke = false)
+                              int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr)
 {
-  return invoke_java_method(jvmp, method_descriptor, fd_wrapper_sp_t{nullptr, [](fd_wrapper_t *) {}}, argc, argv, pss,
-                            is_extended_invoke);
+  auto const no_op_cleanup = [](fd_wrapper_t *) {};
+  return invoke_java_method(jvmp, method_descriptor, std::array<fd_wrapper_sp_t, 3>{{
+                                {nullptr, no_op_cleanup}, {nullptr, no_op_cleanup}, {nullptr, no_op_cleanup} }},
+                            argc, argv, pss);
 }
 static int  supervisor(int argc, char **argv, sessionState& session);
 static void supervisor_child_processor_notify(const pid_t child_pid, const char * const command_line);
@@ -468,9 +469,7 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
   _exit(exit_code); // do not change this to simple return - avoids side effect with Java JVM (per g++ 7.2.1)
 }
 
-static fd_wrapper_sp_t open_write_anon_pipe(const char* const uds_socket_name_cstr, int &rc,
-                                            const bool is_extended_invoke = false)
-{
+static fd_wrapper_sp_t open_write_anon_pipe(const char* const uds_socket_name_cstr, int &rc) {
   static const char* const func_name = __FUNCTION__;
   rc = EXIT_SUCCESS;
 
@@ -557,7 +556,9 @@ static void supervisor_status_response(std::string uds_socket_name, JavaVM * con
 
   auto fd_sp = open_write_anon_pipe(uds_socket_name.c_str(), rc);
   if (rc == EXIT_SUCCESS) {
-    rc = invoke_java_method(jvmp, &meth_desc, std::move(fd_sp));
+    auto const no_op_cleanup = [](fd_wrapper_t*){};
+    rc = invoke_java_method(jvmp, &meth_desc, std::array<fd_wrapper_sp_t, 3> {{
+                            std::move(fd_sp), {nullptr, no_op_cleanup}, {nullptr, no_op_cleanup} }});
   }
   log(LL::DEBUG, "%s() returning %s", __func__, rc == EXIT_SUCCESS ? "EXIT_SUCCESS" : "EXIT_FAILURE");
 }
@@ -649,8 +650,9 @@ inline int jni_detach_thread(JavaVM * const jvmp, JNIEnv * const envp) {
 }
 
 // utility function that invokes a Java method
-static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor, fd_wrapper_sp_t rsp_fd,
-                              int argc, char **argv, const sessionState *pss, const bool is_extended_invoke)
+static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
+                              std::array<fd_wrapper_sp_t, 3> fds_array,
+                              int argc, char **argv, const sessionState *pss)
 {
   int ret = EXIT_SUCCESS;
   auto const detach_thread = [jvmp,&ret](JNIEnv *envp) {
@@ -893,7 +895,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
               auto const field_fd = env->GetFieldID(cls_fdesc, "fd", "I");
               assert(field_fd != nullptr);
               if (field_fd == nullptr) throw -1;
-              env->SetIntField(spFdesc.get(), field_fd, rsp_fd.get()->fd);
+              env->SetIntField(spFdesc.get(), field_fd, (fds_array[0])->fd);
 
               defer_jobj_t spObj_file_output_strm(
                   env->NewObject(cls_file_output_strm, ctor_file_output_strm, spFdesc.get()), defer_jobj);
@@ -914,7 +916,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
 
             log(LL::DEBUG, "%s() creating PrintStream object...", __func__);
             defer_jobj_t spRsp_stream(create_file_outputstream(), defer_jobj);
-            rsp_fd.release();
+            (fds_array[0]).release();
 
             // invoking command-response method
             log(LL::DEBUG, "%s() invoking method \"%s\" with PrintStream", __func__, fullMethodName);
@@ -1728,11 +1730,23 @@ static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const 
     } else {
       auto const extd_invoke_cmd = argv_cmd_line[0]; // by convention first arg must be extended-invoke-command
       auto const uds_socket_name = argv_cmd_line[1]; // by convention second arg must be unix datagram name
-      auto fd_sp = open_write_anon_pipe(uds_socket_name, rc);
+      const auto is_extended_invoke = parse_extended_invoke_option(extd_invoke_cmd);
+      auto const no_op_cleanup = [](fd_wrapper_t *) {};
+      std::array<fd_wrapper_sp_t, 3> fds_array {{
+          {nullptr, no_op_cleanup}, {nullptr, no_op_cleanup}, {nullptr, no_op_cleanup} }};
+      if (is_extended_invoke) {
+        // obtain 3 fd (file descriptors) - the response stream, the error stream, and the input stream
+        ; // TODO: need to implement obtaining 3 fd (file descriptors)
+      } else {
+        // just need to obtain 1 fd (file descriptor) - the response stream
+        auto fd_sp = open_write_anon_pipe(uds_socket_name, rc);
+        if (rc == EXIT_SUCCESS) {
+          fds_array[0] = std::move(fd_sp);
+        }
+      }
       if (rc == EXIT_SUCCESS) {
-        const auto is_extended_invoke = parse_extended_invoke_option(extd_invoke_cmd);
-        rc = invoke_java_method(jvmp, &method_descriptor, std::move(fd_sp),
-                                argc_cmd_line - 1, const_cast<char**>(&argv_cmd_line[1]), nullptr, is_extended_invoke);
+        rc = invoke_java_method(jvmp, &method_descriptor, std::move(fds_array),
+                                argc_cmd_line - 1, const_cast<char **>(&argv_cmd_line[1]));
       }
     }
   }
