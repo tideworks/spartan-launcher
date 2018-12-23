@@ -24,7 +24,6 @@ limitations under the License.
 #include <libgen.h>
 #include <stdexcept>
 #include <typeinfo>
-#include <cassert>
 #include <algorithm>
 #include <popt.h>
 #include <fstream>
@@ -34,6 +33,9 @@ limitations under the License.
 #include "createjvm.h"
 #include "launch-program.h"
 #include "session-state.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 using logger::log;
 using logger::LL;

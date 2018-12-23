@@ -20,7 +20,6 @@ limitations under the License.
 #include <cstdlib>
 #include <cstring>
 #include <memory>
-#include <cassert>
 #include <sstream>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -39,6 +38,9 @@ limitations under the License.
 #include "so-export.h"
 #include "spartan_LaunchProgram.h"
 #include "launch-program.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 using logger::log;
 using logger::LL;

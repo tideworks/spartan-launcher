@@ -16,7 +16,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
-#include <cassert>
 #include <memory>
 #include <unistd.h>
 #include <cstring>
@@ -27,6 +26,9 @@ limitations under the License.
 #include "str-split.h"
 #include "streambuf-wrapper.h"
 #include "process-cmd-dispatch-info.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 using logger::log;
 using logger::LL;

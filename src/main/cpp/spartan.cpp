@@ -25,7 +25,6 @@ limitations under the License.
 #include <alloca.h>
 #include <memory>
 #include <future>
-#include <cassert>
 #include <queue>
 #include <unordered_map>
 #include <algorithm>
@@ -46,6 +45,9 @@ limitations under the License.
 #include "StdOutCapture.h"
 #include "format2str.h"
 #include "open-anon-pipes.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 using logger::log;
 using logger::LL;

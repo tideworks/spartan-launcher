@@ -19,7 +19,6 @@ limitations under the License.
 #include <string>
 #include <cstring>
 #include <memory>
-#include <cassert>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -27,6 +26,9 @@ limitations under the License.
 #include "format2str.h"
 #include "log.h"
 #include "shm.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 using logger::log;
 using logger::LL;

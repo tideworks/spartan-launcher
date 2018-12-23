@@ -16,8 +16,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
-#include <cassert>
 #include "str-split.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 // Utility function that can be used to split an input C string into a returned vector
 // of std::string parts where is split on a specified character. By default will split

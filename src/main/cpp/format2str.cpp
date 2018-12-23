@@ -17,8 +17,10 @@ limitations under the License.
 
 */
 #include <cstdio>
-#include <cassert>
 #include "format2str.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 std::string vformat2str(const char *const fmt, va_list ap) {
   int strbuf_size = 256;

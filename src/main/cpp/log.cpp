@@ -21,11 +21,13 @@ limitations under the License.
 #include <cstring>
 #include <syslog.h>
 #include <string>
-#include <cassert>
 #include <algorithm>
 #include <functional>
 #include "string-view.h"
 #include "log.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 using bpstd::string_view;
 
