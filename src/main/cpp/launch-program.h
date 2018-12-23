@@ -20,6 +20,7 @@ limitations under the License.
 #define __LAUNCH_PROGRAM_H__
 
 #include "string-view.h"
+#include <functional>
 #include <string>
 #include <sys/un.h>
 #include <sys/socket.h>
