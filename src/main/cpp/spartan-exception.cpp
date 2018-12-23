@@ -18,11 +18,9 @@ limitations under the License.
 */
 #include <cstdlib>
 #include <cxxabi.h>
-#include "log.h"
 #include "spartan-exception.h"
 
-using logger::log;
-using logger::LL;
+//#define TEST_SPARTAN_EXCEPTION // uncomment to enable some test code below
 
 char* spartan_exception::type_name(const char * const mangled_name) {
   int status;
