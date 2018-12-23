@@ -21,7 +21,8 @@ set(SOURCE_FILES main.cpp)
 set(LIB_SOURCE_FILES spartan.cpp spartan-exception.cpp findfiles.cpp ini.cpp cfgparse.cpp
     createjvm.cpp shm.cpp memBufStream.cpp fifo-pipe.cpp mq-queue.cpp send-mq-msg.cpp
     spartan-exception.cpp launch-program.cpp format2str.cpp log.cpp path-concat.cpp
-    str-split.cpp session-state.cpp process-cmd-dispatch-info.cpp StdOutCapture.cpp)
+    str-split.cpp session-state.cpp process-cmd-dispatch-info.cpp StdOutCapture.cpp
+    open-anon-pipes.cpp)
 
 if(DEFINED ENV{spartan_build_dir})
   set(spartan_BUILD_DIR "$ENV{spartan_build_dir}")
