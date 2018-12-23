@@ -1101,27 +1101,32 @@ static int supervisor(int argc, char **argv, sessionState& session) {
 try_again:
   // open mq queue and place into smart pointer for RAII
   mq_attr attr = { 0, 10, MSG_BUF_SZ, 0 };
-  struct {
-    const mqd_t mqd;
-    const pid_t pid;
-  }
-      wrp_mqd = {send_mq_msg::mq_open_ex(mq_queue_name.c_str(), O_CREAT | O_EXCL | O_RDONLY, 0662, &attr), getpid()};
-  using wrp_mqd_t = decltype(wrp_mqd);
-  auto const unlink_mqd = [](wrp_mqd_t *p) {
+  const auto mqd = send_mq_msg::mq_open_ex(mq_queue_name.c_str(), O_CREAT | O_EXCL | O_RDONLY, 0662, &attr);
+  struct wrp_mqd_t {
+    const mqd_t _mqd{-1};
+    const pid_t _pid{-1};
+    explicit wrp_mqd_t(mqd_t mqd1, __pid_t pid1) noexcept : _mqd(mqd1), _pid(pid1) {}
+  };
+  struct wrp_mqd_t *ptr;
+  using wrp_mqd_ptr_t = decltype(ptr);
+  auto const unlink_mqd = [](wrp_mqd_ptr_t p) {
     if (p != nullptr) {
-      if (p->mqd != -1) {
-        mq_close(p->mqd);
+      const auto _mqd = p->_mqd;
+      const auto _pid = p->_pid;
+      ::delete p;
+      if (_mqd != -1) {
+        mq_close(_mqd);
       }
       mq_unlink(mq_queue_name.c_str());
-      log(LL::TRACE, "unlinked mq queue '%s' - process pid(%d)", mq_queue_name.c_str(), p->pid);
+      log(LL::TRACE, "unlinked mq queue '%s' - process pid(%d)", mq_queue_name.c_str(), _pid);
     }
   };
-  std::unique_ptr<wrp_mqd_t, decltype(unlink_mqd)> mqd_sp(&wrp_mqd, unlink_mqd);
-  if (mqd_sp->mqd == -1) {
+  std::unique_ptr<wrp_mqd_t, decltype(unlink_mqd)> mqd_sp(new wrp_mqd_t{mqd, getpid()}, unlink_mqd);
+  if (mqd_sp->_mqd == -1) {
     log(LL::ERR, "mq_open_ex('%s') failed(%d): %s", mq_queue_name.c_str(), errno, strerror(errno));
     if (errno == EEXIST) { // check if was name exists error - unlink the name as was orphaned
       mqd_sp.reset(nullptr);
-      mqd_sp.reset(&wrp_mqd);
+      mqd_sp.reset(new wrp_mqd_t{mqd, getpid()});
       log(LL::ERR, "'%s' name existed therefore was orphaned; was unlinked, trying again...", mq_queue_name.c_str());
     }
     if (--try_attempts > 0) {
@@ -1129,7 +1134,7 @@ try_again:
     }
     return EXIT_FAILURE;
   }
-  mq_getattr(mqd_sp->mqd, &attr);
+  mq_getattr(mqd_sp->_mqd, &attr);
   log(LL::TRACE, "mq_flags %ld, max_msgs %ld, msg_size %ld, curr_msgs %ld\n\t\t mq queue name '%s'",
       attr.mq_flags, attr.mq_maxmsg, attr.mq_msgsize, attr.mq_curmsgs, mq_queue_name.c_str());
 
@@ -1473,7 +1478,7 @@ try_again:
   bool loop_continue = true;
   do {
     unsigned msg_prio = 0;
-    const int msg_sz = (int) mq_timedreceive(mqd_sp->mqd, buffer, sizeof(buffer), &msg_prio, &timeout);
+    const int msg_sz = (int) mq_timedreceive(mqd_sp->_mqd, buffer, sizeof(buffer), &msg_prio, &timeout);
     const int ern = msg_sz < 0 ? errno : 0;
     if (ern == ETIMEDOUT) {
       if (flag != 0) {// check to see if signaled to terminate
