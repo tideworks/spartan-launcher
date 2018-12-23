@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 2.8)
 project(spartan)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 include_directories("$ENV{JAVA_HOME}/include/" "$ENV{JAVA_HOME}/include/linux/")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -fPIC")
