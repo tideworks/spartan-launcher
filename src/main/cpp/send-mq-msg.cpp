@@ -87,7 +87,7 @@ namespace send_mq_msg {
    * @return a result of zero indicates message was successfully published to target queue
    */
   int send_mq_msg(string_view const msg, string_view const queue_name) {
-    log(LL::DEBUG, "%s() called:\n\tmsg: %s\n\tque: %s", __func__, msg, queue_name.c_str());
+    log(LL::DEBUG, "%s() called:\n\tmsg: %s\n\tque: %s", __func__, msg.c_str(), queue_name.c_str());
     struct {
       const mqd_t mqd;
     }
@@ -185,7 +185,7 @@ namespace send_mq_msg {
     }
     *(--bufpos) = null_ch; // replace last space char with null C string termination character
 
-    log(LL::DEBUG, "%s(): inform service to process:\n\t\'%s\'", __func__, buf);
+    log(LL::DEBUG, "%s(): inform service at queue \'%s\' to process:\n\t\'%s\'", __func__, queue_name.c_str(), buf);
     // now send the string buffer to the parent supervisor process
     return send_mq_msg::send_mq_msg({buf , sum - 1}, queue_name);
   }
