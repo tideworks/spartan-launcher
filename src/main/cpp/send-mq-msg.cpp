@@ -20,10 +20,12 @@ limitations under the License.
 #include <mqueue.h>
 #include <cstring>
 #include <memory>
-#include <cassert>
 #include <sys/stat.h>
 #include "log.h"
 #include "send-mq-msg.h"
+
+//#undef NDEBUG // uncomment this line to enable asserts in use below
+#include <cassert>
 
 // Need to also use gcc/g++ -rdynamic compiler option when enabling debug stack trace.
 // (0 to disable : non-zero to enable)
@@ -159,15 +161,16 @@ namespace send_mq_msg {
     auto const argv_sizes = (size_t*) alloca(argc * sizeof(size_t));
     argv_sizes[0] = extended_invoke_cmd.size();
     argv_sizes[1] = uds_socket_name.size();
-    size_t buf_size = quote_overhead * 2;
+    size_t buf_size = (argv_sizes[0] + argv_sizes[1] + quote_overhead * 2);
     for (int i = 2; i < argc; i++) {
-      buf_size += ((argv_sizes[i] = strlen(argv_dup[i])) + quote_overhead);
+      const auto arg_str_len = argv_sizes[i] = strlen(argv_dup[i]);
+      buf_size += (arg_str_len + quote_overhead);
     }
 
     // stack allocate buffer for holding the flattened out string of argv arguments
     auto const buf = (char*) alloca(++buf_size);
-    buf[0] = null_ch;   // null terminate buffer starting out as an empty string
-    char *bufpos = buf; // buf ptr used for pointer arithmetic
+    buf[0] = null_ch;  // null terminate buffer starting out as an empty C string
+    auto bufpos = buf; // initialize buf ptr to be used for pointer arithmetic
 
     // now run through the argv_dup array, copy each arg into string buffer and put
     // double quotes around it; a space character delimiter separates each argument
@@ -175,7 +178,7 @@ namespace send_mq_msg {
     for (int i = 0; i < argc; i++) {
       const auto n = argv_sizes[i];
       if (n == 0) continue; // skip empty string argv arguments
-      assert(buf_size >= sum + n + quote_overhead);
+      assert(buf_size >= (sum + n + quote_overhead));
       *bufpos++ = quote_ch;
       strncpy(bufpos, argv_dup[i], n);
       bufpos += n;
@@ -184,9 +187,11 @@ namespace send_mq_msg {
       sum += (n + quote_overhead);
     }
     *(--bufpos) = null_ch; // replace last space char with null C string termination character
+    assert((bufpos - buf) == static_cast<long int>(sum - 1));
+    assert(buf_size >= sum);
 
     log(LL::DEBUG, "%s(): inform service at queue \'%s\' to process:\n\t\'%s\'", __func__, queue_name.c_str(), buf);
     // now send the string buffer to the parent supervisor process
-    return send_mq_msg::send_mq_msg({buf , sum - 1}, queue_name);
+    return send_mq_msg::send_mq_msg({buf, sum - 1}, queue_name);
   }
 }
