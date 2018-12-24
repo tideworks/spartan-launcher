@@ -27,11 +27,11 @@ limitations under the License.
 static const char config_file_parse_err_fmt[] = "config file parsing error %d in %s() at line %d\n";
 static const char config_file_load_err_fmt[]  = "can't load \"%s\"\n";
 
-bool process_config(const char * const dirpath, const char * const cfgfilename, cfg_parse_handler_t handler) {
+bool process_config(const char * const dirpath, const char * const cfgfilename, const cfg_parse_handler_t &handler) {
   const std::string cfgfullfilepath(path_concat(dirpath, cfgfilename));
 
   // check to see if specified config file exist
-  struct stat statbuf;
+  struct stat statbuf{};
   if (stat(cfgfullfilepath.c_str(), &statbuf) == -1 || (statbuf.st_mode & S_IFMT) != S_IFREG) {
     return false;
   }

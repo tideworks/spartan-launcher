@@ -33,8 +33,8 @@ limitations under the License.
 #include <cxxabi.h>
 #include <popt.h>
 #include "string-view.h"
-#include "so-export.h"
 #include "shm.h"
+#include "so-export.h"
 #include "createjvm.h"
 #include "fifo-pipe.h"
 #include "mq-queue.h"
@@ -43,7 +43,6 @@ limitations under the License.
 #include "process-cmd-dispatch-info.h"
 #include "log.h"
 #include "StdOutCapture.h"
-#include "format2str.h"
 #include "open-anon-pipes.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
@@ -133,10 +132,10 @@ template<typename T>
 using defer_jstr_sp_t = std::unique_ptr<_jstring, T>;
 
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
-                                 send_mq_msg_cb_t &send_mq_msg_cb);
-static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp);
+                                 const send_mq_msg_cb_t &send_mq_msg_cb);
+static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp);
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
-                              std::array<fd_wrapper_sp_t, 3> fds_array,
+                              std::array<fd_wrapper_sp_t, 3> &&fds_array,
                               int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr);
 inline int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
                               int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr)
@@ -150,12 +149,13 @@ static int  supervisor(int argc, char **argv, sessionState& session);
 static void supervisor_child_processor_notify(const pid_t child_pid, const char * const command_line);
 static void supervisor_child_processor_completion_notify(const siginfo_t& info);
 static int  invoke_java_child_processor_notify(const char * const child_pid, const char * const command_line,
-                                               JavaVM * const jvmp, methodDescriptor method_descriptor);
+                                               JavaVM * const jvmp, const methodDescriptor &method_descriptor);
 static int  invoke_java_child_processor_completion_notify(const char * const child_pid,
-                                                          JavaVM * const jvmp, methodDescriptor method_descriptor);
+                                                        JavaVM * const jvmp, const methodDescriptor &method_descriptor);
 static int  invoke_java_supervisor_command(int /*argc*/, char **/*argv*/, const char *const msg_arg, JavaVM *const jvmp,
                                            const methodDescriptor &method_descriptor);
-static int  invoke_child_process_action(sessionState& session_mut, const char *jvm_override_optns, action_cb_t action);
+static int  invoke_child_process_action(sessionState& session_mut, const char *jvm_override_optns,
+                                        const action_cb_t &action);
 static int  invoke_child_processor_command(int argc, char **argv, const char *const msg_arg,
                                            JavaVM *const jvmp, const methodDescriptor &method_descriptor);
 
@@ -170,9 +170,9 @@ static auto const shm_allocator_cleanup = [](shm::ShmAllocator *p) {
 using shm_allocator_sp_t = std::unique_ptr<shm::ShmAllocator, decltype(shm_allocator_cleanup)>;
 static shm_allocator_sp_t s_shm_allocator_sp(nullptr, shm_allocator_cleanup);
 
-static std::function<int(const char*)> send_supervisor_mq_msg{ [](const char * const msg)-> int{return EXIT_SUCCESS;} };
+static std::function<int(const char*)> send_supervisor_mq_msg{ [](const char*/*msg*/) -> int { return EXIT_SUCCESS; } };
 static std::function<void(int)> quit_launcher_on_term_code{ [](int status_code){ _exit(status_code); } };
-static std::function<void(int)> quit_supervisor_on_term_code{ [](int /*status_code*/){} };
+static std::function<void(int)> quit_supervisor_on_term_code{ [](int/*status_code*/){} };
 
 static int s_parent_thrd_pid = 0;
 inline int get_parent_pid() { return s_parent_thrd_pid; }
@@ -469,7 +469,9 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
 
 // Handles --STATUS request message as supervisor process; anonymous pipe is
 // obtained opened for write, status result is written to the pipe, and closed
-static void supervisor_status_response(std::string uds_socket_name, JavaVM * const jvmp, methodDescriptor meth_desc) {
+static void supervisor_status_response(std::string uds_socket_name, JavaVM *const jvmp,
+                                       const methodDescriptor &meth_desc)
+{
   int rc;
   log(LL::DEBUG, "%s(): open unix-datagram-socket %s for conveying pipe fd for writing",
       __func__, uds_socket_name.c_str());
@@ -486,7 +488,7 @@ static void supervisor_status_response(std::string uds_socket_name, JavaVM * con
 // Issues -STATUS request command to parent supervisor - result is written
 // to an anonymous output pipe, which is written to stdout by requester process
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
-                                 send_mq_msg_cb_t &send_mq_msg_cb)
+                                 const send_mq_msg_cb_t &send_mq_msg_cb)
 {
   int strbuf_size = 256;
   auto strbuf = (char*) alloca(strbuf_size);
@@ -509,7 +511,7 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
   return rtn == EXIT_SUCCESS ? stdout_echo_response_stream(uds_socket_name, std::move(socket_fd_sp)) : rtn;
 }
 
-static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t read_fd_sp) {
+static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp) {
   auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
   fd_wrapper_sp_t fd_sp{ std::move(std::get<1>(rslt)) };
   auto const fd = fd_sp->fd;
@@ -561,7 +563,7 @@ inline JNIEnv* jni_attach_thread(JavaVM * const jvmp) {
 
 inline int jni_detach_thread(JavaVM * const jvmp, JNIEnv * const envp) {
   int ret = EXIT_SUCCESS;
-  if (envp != nullptr && envp->ExceptionCheck()) {
+  if (envp != nullptr && envp->ExceptionCheck() != JNI_FALSE) {
     ret = EXIT_FAILURE;
     const auto excptn_str = StdOutCapture::capture_stdout_stderr([envp](){ envp->ExceptionDescribe(); });
     log(LL::ERR, excptn_str.c_str());
@@ -571,7 +573,7 @@ inline int jni_detach_thread(JavaVM * const jvmp, JNIEnv * const envp) {
 
 // utility function that invokes a Java method
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *method_descriptor,
-                              std::array<fd_wrapper_sp_t, 3> fds_array,
+                              std::array<fd_wrapper_sp_t, 3> &&fds_array,
                               int argc, char **argv, const sessionState *pss)
 {
   int ret = EXIT_SUCCESS;
@@ -704,7 +706,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
     }
 
     try {
-      jboolean was_exception_raised = JNI_FALSE;
+      bool was_exception_raised = false;
       auto inner_deref_jargs_array_sp = std::move(spJargs_array);
 
       const auto which_method = method_descriptor->which_method();
@@ -723,7 +725,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
 
         log(LL::DEBUG, "%s() invoking static method \"%s\"", __func__, fullMethodName);
         auto const ser_cmd_dispatch_info = env->CallStaticObjectMethod(jcls, get_cmd_dispatch_info);
-        was_exception_raised = env->ExceptionCheck();
+        was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
 
         if (!was_exception_raised) {
           cmd_dsp::CmdDispatchInfoProcessor processCDI(env, class_name, method_name, jcls, ss);
@@ -750,7 +752,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
         log(LL::DEBUG, "%s() invoking static method \"%s\"", __func__, fullMethodName);
         env->CallStaticVoidMethod(spartanbase_cls, spartanbase_main, spProgname_utf_str.get(),
                                   (jint) logger::get_level(), spMain_meth.get(), jargs);
-        was_exception_raised = env->ExceptionCheck();
+        was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
       } else {
         // invoke an instance method (unless is WM::CHILD_DO_CMD, which is static)
         switch (which_method) {
@@ -848,7 +850,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
             } else {
               env->CallVoidMethod(mObj, mid, jargs, spRsp_stream.get());
             }
-            if (env->ExceptionCheck()) {
+            if (env->ExceptionCheck() != JNI_FALSE) {
               const auto excptn_str = StdOutCapture::capture_stdout_stderr([env](){ env->ExceptionDescribe(); });
               auto const excptn_cstr = excptn_str.c_str();
               log(LL::ERR, "process %d Java method %s() threw exception:\n%s", getpid(), fullMethodName, excptn_cstr);
@@ -862,7 +864,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
           break;
         case WM::CHILD_NOTIFY: {
             log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
-            const jint pid = atoi(argv[0]);
+            const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
             const char* const cmd_line = argv[1];
             defer_jstr_t spUtf_str(env->NewStringUTF(cmd_line), defer_jstr);
             if (!spUtf_str) {
@@ -874,7 +876,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
           break;
         case WM::CHILD_COMPLETION_NOTIFY: {
             log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
-            const jint pid = atoi(argv[0]);
+            const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
             env->CallVoidMethod(mObj, mid, pid);
           }
           break;
@@ -882,7 +884,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase *me
           log(LL::WARN, "%s() not valid or known method \"%s\"", __func__, fullMethodName);
           break;
         }
-        was_exception_raised = env->ExceptionCheck();
+        was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
       }
       if (was_exception_raised) {
         const auto excptn_str = StdOutCapture::capture_stdout_stderr([env](){ env->ExceptionDescribe(); });
@@ -1472,7 +1474,7 @@ try_again:
 
   char buffer[MSG_BUF_SZ]; // buffer for received message from mq queue
   const int timeout_interval = 5; // seconds
-  timespec timeout;
+  timespec timeout{};
   clock_gettime(CLOCK_REALTIME, &timeout);
   timeout.tv_sec += timeout_interval;
 
@@ -1525,7 +1527,7 @@ static void supervisor_child_processor_notify(const pid_t child_pid, const char 
   send_supervisor_mq_msg(strbuf);
 }
 
-static void supervisor_child_processor_completion_notify(const siginfo_t& info) {
+static void supervisor_child_processor_completion_notify(const siginfo_t &info) {
   if (is_trace_level()) {
     switch (info.si_code) {
       case CLD_EXITED:
@@ -1554,20 +1556,22 @@ static void supervisor_child_processor_completion_notify(const siginfo_t& info) 
 }
 
 static int invoke_java_child_processor_notify(const char *const child_pid, const char *const command_line,
-                                              JavaVM *const jvmp, methodDescriptor method_descriptor)
+                                              JavaVM *const jvmp, const methodDescriptor &method_descriptor)
 {
   std::array<char*, 3> argv = { const_cast<char*>(child_pid), const_cast<char*>(command_line), nullptr };
   return invoke_java_method(jvmp, &method_descriptor, argv.size() - 1, argv.data()); // argc, argv parameters
 }
 
 static int invoke_java_child_processor_completion_notify(const char *const child_pid, JavaVM *const jvmp,
-                                                         methodDescriptor method_descriptor)
+                                                         const methodDescriptor &method_descriptor)
 {
   std::array<char*, 2> argv = { const_cast<char*>(child_pid), nullptr };
   return invoke_java_method(jvmp, &method_descriptor, argv.size() - 1, argv.data()); // argc, argv parameters
 }
 
-static int invoke_child_process_action(sessionState &session_mut, const char *jvm_override_optns, action_cb_t action) {
+static int invoke_child_process_action(sessionState &session_mut, const char *jvm_override_optns,
+                                       const action_cb_t &action)
+{
   int exit_code = EXIT_FAILURE; // assume will exit the forked child process with failure exit code
   try {
     if (session_mut.jvm_sp) {

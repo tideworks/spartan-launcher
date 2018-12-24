@@ -47,9 +47,15 @@ protected:
   bool isStaticMethod{true};
   WhichMethod whichMethod{WM::NONE};
 protected:
-  methodDescriptorBase() = default;
-  methodDescriptorBase(bool is_static_method, WhichMethod which) noexcept
+  methodDescriptorBase() noexcept = default;
+  explicit methodDescriptorBase(bool is_static_method, WhichMethod which) noexcept
       : isStaticMethod(is_static_method), whichMethod(which) {}
+  virtual ~methodDescriptorBase() = default;
+public:
+  methodDescriptorBase(const methodDescriptorBase &) = delete;
+  methodDescriptorBase(methodDescriptorBase &&) = delete;
+  methodDescriptorBase& operator=(const methodDescriptorBase &) = delete;
+  methodDescriptorBase& operator=(methodDescriptorBase &&) = delete;
 public:
   bool isStatic() const { return isStaticMethod; }
   WhichMethod which_method() const { return whichMethod; }
@@ -67,21 +73,24 @@ protected:
 
 public:
   methodDescriptor() = default;
-  methodDescriptor(const char *full_method_name, const char *descriptor, bool is_static_method, WhichMethod which)
+  explicit methodDescriptor(const char *full_method_name, const char *descriptor, bool is_static_method,
+                            WhichMethod which)
       : methodDescriptorBase(is_static_method, which), fullMethodName(full_method_name), descriptor(descriptor) {}
-  methodDescriptor(std::string && full_method_name, std::string && descriptor, bool is_static_method, WhichMethod which)
+  explicit methodDescriptor(std::string &&full_method_name, std::string &&descriptor, bool is_static_method,
+                            WhichMethod which)
       : methodDescriptorBase(is_static_method, which), fullMethodName(std::move(full_method_name)),
         descriptor(std::move(descriptor)) {}
-  methodDescriptor(const methodDescriptor & md) { *this = md; }
-  methodDescriptor(methodDescriptor && md) noexcept { *this = std::move(md); }
-  methodDescriptor & operator=(const methodDescriptor & md);
-  methodDescriptor & operator=(methodDescriptor && md) noexcept;
+  methodDescriptor(const methodDescriptor &md) { *this = md; }
+  methodDescriptor(methodDescriptor &&md) noexcept { *this = std::move(md); }
+  methodDescriptor & operator=(const methodDescriptor &md);
+  methodDescriptor & operator=(methodDescriptor &&md) noexcept;
+  ~methodDescriptor() override = default;
 public:
   bool empty() const override { return fullMethodName.empty(); }
   const char* c_str() const override { return fullMethodName.c_str(); }
   const char* desc_str() const override { return descriptor.c_str(); }
-  virtual const char* cmd_cstr() const override { return ""; }
-  virtual const char* jvm_optns_str() const override { return ""; }
+  const char* cmd_cstr() const override { return ""; }
+  const char* jvm_optns_str() const override { return ""; }
 
   friend std::ostream& operator << (std::ostream &os, const methodDescriptor &self);
   friend std::istream& operator >> (std::istream &is, methodDescriptor &self);
@@ -90,31 +99,31 @@ public:
 
 class methodDescriptorCmd: public methodDescriptor {
 protected:
-  std::string command;
-  std::string jvmOptionsCommandLine;
+  std::string command{};
+  std::string jvmOptionsCommandLine{};
 
 public:
   methodDescriptorCmd() = default;
-  methodDescriptorCmd(const char *full_method_name, const char *descriptor, const char *cmd, bool is_static_method,
-                      WhichMethod which)
-      : methodDescriptor(full_method_name, descriptor, is_static_method, which), command(cmd),
-        jvmOptionsCommandLine() {}
-  methodDescriptorCmd(std::string && full_method_name, std::string && descriptor, std::string && cmd,
-                      bool is_static_method, WhichMethod which)
+  explicit methodDescriptorCmd(const char *full_method_name, const char *descriptor, const char *cmd,
+                               bool is_static_method, WhichMethod which)
+      : methodDescriptor(full_method_name, descriptor, is_static_method, which), command(cmd) {}
+  explicit methodDescriptorCmd(std::string &&full_method_name, std::string &&descriptor, std::string &&cmd,
+                               bool is_static_method, WhichMethod which)
       : methodDescriptor(std::move(full_method_name), std::move(descriptor), is_static_method, which),
-        command(std::move(cmd)), jvmOptionsCommandLine() {}
-  methodDescriptorCmd(const char *full_method_name, const char *descriptor, const char *cmd, const char *jvm_optns,
-                      bool is_static_method, WhichMethod which)
+        command(std::move(cmd)) {}
+  explicit methodDescriptorCmd(const char *full_method_name, const char *descriptor, const char *cmd,
+                               const char *jvm_optns, bool is_static_method, WhichMethod which)
       : methodDescriptor(full_method_name, descriptor, is_static_method, which), command(cmd),
         jvmOptionsCommandLine(jvm_optns) {}
-  methodDescriptorCmd(std::string && full_method_name, std::string && descriptor, std::string && cmd,
-                      std::string && jvm_optns, bool is_static_method, WhichMethod which)
+  explicit methodDescriptorCmd(std::string && full_method_name, std::string && descriptor, std::string && cmd,
+                               std::string && jvm_optns, bool is_static_method, WhichMethod which)
       : methodDescriptor(std::move(full_method_name), std::move(descriptor), is_static_method, which),
         command(std::move(cmd)), jvmOptionsCommandLine(std::move(jvm_optns)) {}
-  methodDescriptorCmd(const methodDescriptorCmd & md) { *this = md; }
-  methodDescriptorCmd(methodDescriptorCmd && md) noexcept { *this = std::move(md); }
-  methodDescriptorCmd & operator=(const methodDescriptorCmd & md);
-  methodDescriptorCmd & operator=(methodDescriptorCmd && md) noexcept;
+  methodDescriptorCmd(const methodDescriptorCmd &md) { *this = md; }
+  methodDescriptorCmd(methodDescriptorCmd &&md) noexcept { *this = std::move(md); }
+  methodDescriptorCmd & operator=(const methodDescriptorCmd &md);
+  methodDescriptorCmd & operator=(methodDescriptorCmd &&md) noexcept;
+  ~methodDescriptorCmd() override = default;
 public:
   const char* cmd_cstr() const override { return command.c_str(); }
   const std::string& cmd_str() const { return command; }
@@ -131,7 +140,7 @@ private:
   static void cleanup_jnienv(JNIEnv*);
 
 public:
-  short int child_process_max_count;
+  short int child_process_max_count{0};
   methodDescriptor spartanMainEntryPoint;
   methodDescriptor spartanGetStatusEntryPoint;
   methodDescriptor spartanSupervisorShutdownEntryPoint;
@@ -154,9 +163,11 @@ public:
   sessionState(const char * const cfg_file, const char * const jvmlib_path);
   sessionState(sessionState & ss) = delete;
   sessionState & operator=(sessionState & ss) = delete;
-  sessionState & clone_info_part(const sessionState &ss);
-  sessionState(sessionState && ss) : child_process_max_count(0) { *this = std::move(ss); }
-  sessionState & operator=(sessionState && ss);
+  sessionState & clone_info_part(const sessionState &ss) noexcept;
+  sessionState(sessionState && ss) noexcept : child_process_max_count(0) { *this = std::move(ss); }
+  sessionState & operator=(sessionState && ss) noexcept;
+  ~sessionState() = default;
+
   void create_jvm(const char *jvm_override_optns = "");
 
   friend std::ostream& operator << (std::ostream &os, const sessionState &self);

@@ -11,22 +11,17 @@ All rights reserved.
 inih library license: https://raw.githubusercontent.com/benhoyt/inih/master/LICENSE.txt
 
 Enhanced for use of C++11 syntax and features; May 2015, Roger D. Voss
+clang-tidy inspection recommendations applied; Dec 2018, Roger D. Voss
 
 */
 #ifndef __INI_H__
 #define __INI_H__
 
 #include <functional>
-
-/* Make this header file easier to include in C++ code */
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 #include <cstdio>
 
-typedef std::function<int (const char*, const char*, const char*)> cfg_parse_handler_t;
-typedef std::function<void (int ec,const char* op,int ln)> err_code_handler_t;
+using cfg_parse_handler_t = std::function<int (const char*, const char*, const char*)>;
+using err_code_handler_t = std::function<void (int ec, const char* op, int ln)>;
 
 /* Parse given INI-style file. May have [section]s, name=value pairs
    (whitespace stripped), and comments starting with ';' (semicolon). Section
@@ -41,11 +36,11 @@ typedef std::function<void (int ec,const char* op,int ln)> err_code_handler_t;
    stop on first error), -1 on file open error, or -2 on memory allocation
    error (only when INI_USE_STACK is zero).
 */
-int ini_parse(const char* const filename, cfg_parse_handler_t handler, err_code_handler_t error_code);
+int ini_parse(const char *const filename, const cfg_parse_handler_t &handler, const err_code_handler_t &error_code);
 
 /* Same as ini_parse(), but takes a FILE* instead of filename. This doesn't
    close the file when it's finished -- the caller must do that. */
-int ini_parse_file(FILE* const file, cfg_parse_handler_t handler, err_code_handler_t error_code);
+int ini_parse_file(FILE *const file, const cfg_parse_handler_t &handler, const err_code_handler_t &error_code);
 
 /* Nonzero to allow multi-line value parsing, in the style of Python's
    ConfigParser. If allowed, ini_parse() will call the handler with the same
@@ -68,10 +63,6 @@ int ini_parse_file(FILE* const file, cfg_parse_handler_t handler, err_code_handl
 /* Maximum line length for any line in INI file. */
 #ifndef INI_MAX_LINE
 #define INI_MAX_LINE 512
-#endif
-
-#ifdef __cplusplus
-}
 #endif
 
 #endif /* __INI_H__ */

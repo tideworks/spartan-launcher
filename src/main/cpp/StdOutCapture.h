@@ -41,14 +41,19 @@ using fd_cleanup_t = std::function<void (int*)>;
 class StdOutCapture {
 private:
   static void cleanup(int*);
-  bool is_capturing = false;
-  int old_stdout = -1, old_stderr = -1;
+  bool is_capturing{false};
+  int old_stdout{-1}, old_stderr{-1};
   int pipes[2] { -1, -1 };
-  std::string capture_buf;
+  std::string capture_buf{};
   std::unique_ptr<int, fd_cleanup_t> sp_stdout     { nullptr, cleanup };
   std::unique_ptr<int, fd_cleanup_t> sp_stderr     { nullptr, cleanup };
   std::unique_ptr<int, fd_cleanup_t> sp_read_pipe  { nullptr, cleanup };
   std::unique_ptr<int, fd_cleanup_t> sp_write_pipe { nullptr, cleanup };
+public:
+  StdOutCapture(const StdOutCapture &) = delete;
+  StdOutCapture(const StdOutCapture &&) = delete;
+  StdOutCapture& operator=(const StdOutCapture &) = delete;
+  StdOutCapture& operator=(const StdOutCapture &&) = delete;
 public:
   StdOutCapture();
   ~StdOutCapture();
@@ -57,7 +62,7 @@ public:
   void stop_capture();
   void clear() { capture_buf.clear(); }
 public:
-  static std::string capture_stdout_stderr(std::function<void()> action);
+  static std::string capture_stdout_stderr(const std::function<void()> &action);
 };
 
 #endif //__SPARTAN_STDOUTCAPTURE_H__

@@ -83,7 +83,7 @@ void sessionState::cleanup_jnienv(JNIEnv *envp) {
   log(LL::TRACE, ">> %s(envp) - pid(%d)", __func__, pid);
   if (envp != nullptr) {
     log(LL::TRACE, "check if any Java JVM exceptions to describe - pid(%d)", pid);
-    if (envp->ExceptionOccurred()) {
+    if (envp->ExceptionOccurred() != nullptr) {
       log(LL::TRACE, "about to describe Java JVM exceptions - pid(%d)", pid);
       envp->ExceptionDescribe();
       log(LL::DEBUG, "described Java JVM exceptions - pid(%d)", pid);
@@ -443,7 +443,7 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
 }
 
 // Does a copy of the information part of sessionState only.
-sessionState & sessionState::clone_info_part(const sessionState &ss) {
+sessionState & sessionState::clone_info_part(const sessionState &ss) noexcept {
   child_process_max_count = ss.child_process_max_count;
   spartanMainEntryPoint = ss.spartanMainEntryPoint;
   spartanGetStatusEntryPoint = ss.spartanGetStatusEntryPoint;
@@ -466,13 +466,13 @@ sessionState & sessionState::clone_info_part(const sessionState &ss) {
 // copies the information part of sessionState and then
 // moves the smart pointer state of the jvm shared library
 // handle, the instantiated jvm object, and jvm environment
-sessionState & sessionState::operator=(sessionState && ss_mut) {
+sessionState & sessionState::operator=(sessionState && ss) noexcept {
   // copy
-  clone_info_part(ss_mut);
+  clone_info_part(ss);
   // move
-  libjvm_sp = std::move(ss_mut.libjvm_sp);
-  jvm_sp = std::move(ss_mut.jvm_sp);
-  env_sp = std::move(ss_mut.env_sp);
+  libjvm_sp = std::move(ss.libjvm_sp);
+  jvm_sp = std::move(ss.jvm_sp);
+  env_sp = std::move(ss.env_sp);
   return *this;
 }
 

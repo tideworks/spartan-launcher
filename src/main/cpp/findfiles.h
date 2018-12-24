@@ -27,6 +27,6 @@ DECL_EXCEPTION(findfiles)
 
 using findfiles_cb_t = std::function<bool (const char * const filepath, const char * const filename)>;
 
-bool findfiles(const char * const wrkdir, findfiles_cb_t callback);
+bool findfiles(const char * const wrkdir, const findfiles_cb_t &callback);
 
 #endif // __FINDFILES_H__

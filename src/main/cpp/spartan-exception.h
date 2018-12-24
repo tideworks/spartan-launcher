@@ -41,12 +41,12 @@ protected:
 public:
   spartan_exception(const char * const msg) = delete;
   spartan_exception(std::string &&) = delete;
-  spartan_exception(std::string const &) = delete;
+  spartan_exception(const std::string &) = delete;
   spartan_exception(std::string &) = delete;
-  spartan_exception(spartan_exception const &) = delete;
-  spartan_exception& operator=(spartan_exception const &) = delete;
+  spartan_exception(const spartan_exception &) = delete;
+  spartan_exception& operator=(const spartan_exception &) = delete;
   spartan_exception(spartan_exception &&) = delete;
-  spartan_exception& operator=(spartan_exception const &&) = delete;
+  spartan_exception& operator=(spartan_exception &&) = delete;
   ~spartan_exception() override = default;
 public:
   virtual const char* name() const throw()  { return _nm.get(); }
@@ -62,10 +62,10 @@ public:\
   x##_exception() = delete;\
   explicit x##_exception(const char * const msg) : spartan_exception{ typeid(*this).name(), msg } {}\
   explicit x##_exception(std::string &&msg) : spartan_exception{ typeid(*this).name(), msg } {}\
-  x##_exception(std::string const &) = delete;\
+  x##_exception(const std::string &) = delete;\
   x##_exception(std::string &) = delete;\
-  x##_exception(x##_exception const &) = delete;\
-  x##_exception& operator=(x##_exception const &) = delete;\
+  x##_exception(const x##_exception &) = delete;\
+  x##_exception& operator=(const x##_exception &) = delete;\
   x##_exception(x##_exception &&ex) noexcept : spartan_exception() { this->operator=(std::move(ex)); }\
   x##_exception& operator=(x##_exception &&ex) noexcept {\
     this->_nm  = std::move(ex._nm);\

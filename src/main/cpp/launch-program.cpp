@@ -214,7 +214,7 @@ namespace launch_program {
     return std::make_tuple(pid_buffer.pid,
                            std::move(sp_child_rdr_fd), std::move(sp_child_err_fd), std::move(sp_child_wrt_fd));
   }
-}
+} // namespace launch_program
 
 using namespace launch_program;
 

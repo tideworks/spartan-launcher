@@ -122,7 +122,7 @@ void StdOutCapture::stop_capture() {
   }
 }
 
-std::string StdOutCapture::capture_stdout_stderr(std::function<void()> action) {
+std::string StdOutCapture::capture_stdout_stderr(const std::function<void()> &action) {
   static std::mutex m;
   std::lock_guard<std::mutex> lk(m);
   auto const unlock_file = [](FILE *pf) {

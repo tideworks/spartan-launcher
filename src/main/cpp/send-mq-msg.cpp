@@ -34,7 +34,6 @@ limitations under the License.
 #include <execinfo.h>
 #endif
 
-using logger::log;
 using logger::LL;
 
 namespace send_mq_msg {
@@ -194,4 +193,4 @@ namespace send_mq_msg {
     // now send the string buffer to the parent supervisor process
     return send_mq_msg::send_mq_msg({buf, sum - 1}, queue_name);
   }
-}
+} // namespace send_mq_msg

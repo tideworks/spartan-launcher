@@ -25,6 +25,6 @@ limitations under the License.
 // declare process_cfg_exception
 DECL_EXCEPTION(process_cfg)
 
-bool process_config(const char * const dirpath, const char * const cfgfilename, cfg_parse_handler_t handler);
+bool process_config(const char * const dirpath, const char * const cfgfilename, const cfg_parse_handler_t &handler);
 
 #endif // __CFGPARSE_H__

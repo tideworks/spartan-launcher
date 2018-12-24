@@ -30,7 +30,6 @@ limitations under the License.
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
 
-using logger::log;
 using logger::LL;
 
 extern const char * progname();
@@ -53,11 +52,11 @@ namespace shm {
   private:
     const int _fd;
   public:
-    fd_t(int fd) noexcept : _fd(fd) {}
+    explicit fd_t(int fd) noexcept : _fd(fd) {}
     int fd() const noexcept { return _fd; }
   };
 
-  static auto const cleanup_fd = [](fd_t* p) {
+  auto const cleanup_fd = [](fd_t* p) {
     if (p != nullptr) {
       close(p->fd());
     }
@@ -69,7 +68,7 @@ namespace shm {
     fd_t fd_wrpr{ open_shm(shm_name, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR) };
     std::unique_ptr<fd_t, decltype(cleanup_fd)> spfd(&fd_wrpr, cleanup_fd);
     const auto pg_size = sysconf(_SC_PAGE_SIZE);
-    const size_t length = pages * pg_size;
+    const auto length = static_cast<size_t >(pages * pg_size);
     if (ftruncate(spfd->fd(), length) == -1) {
       throw shared_mem_exception(format2str("failed ftruncate(%lu) on \"%s\" shared memory object:\n\t%s",
                                             length, shm_name.c_str(), strerror(errno)));
@@ -86,12 +85,12 @@ namespace shm {
     const std::string shm_name = get_shm_name();
     fd_t fd_wrpr{ open_shm(shm_name, O_RDONLY, S_IRUSR) };
     std::unique_ptr<fd_t, decltype(cleanup_fd)> spfd(&fd_wrpr, cleanup_fd);
-    struct stat buf;
+    struct stat buf{};
     if (fstat(spfd->fd(), &buf) == -1) {
       throw shared_mem_exception(format2str("failed fstat() on \"%s\" shared memory object:\n\t%s",
                                             shm_name.c_str(), strerror(errno)));
     }
-    const size_t length = buf.st_size;
+    const auto length = static_cast<size_t >(buf.st_size);
     void * const rtn = mmap(nullptr, length, PROT_READ, MAP_SHARED, spfd->fd(), 0);
     if (rtn == MAP_FAILED) {
       throw shared_mem_exception(format2str("failed mmap(%lu) on \"%s\" shared memory object:\n\t%s",
@@ -128,7 +127,7 @@ namespace shm {
                                             shm_name.c_str(), new_offset - max_size));
     }
     void* const rtn = reinterpret_cast<char*>(base_addr) + curr_offset;
-    curr_offset = new_offset;
+    curr_offset = static_cast<int>(new_offset);
     return rtn;
   }
 
@@ -144,7 +143,7 @@ namespace shm {
     const auto rslt = allocate(pages);
     return ::new ShmAllocator(std::get<0>(rslt), std::get<1>(rslt));
   }
-}
+} // namespace shm
 
 void* operator new(std::size_t size, shm::ShmAllocator& shm_alloc) { return shm_alloc.alloc(size); }
 void* operator new[] (std::size_t size, shm::ShmAllocator& shm_alloc) { return shm_alloc.alloc(size); }
@@ -156,12 +155,12 @@ void* operator new[] (std::size_t size, shm::ShmAllocator& shm_alloc) { return s
 extern "C" void __assert (const char *__assertion, const char *__file, int __line)
      __THROW __attribute__ ((__noreturn__));
 
-void operator delete(void*, shm::ShmAllocator &) {
+void operator delete(void*/*unused*/, shm::ShmAllocator &/*unused*/) {
   __assert("do not use placement delete operator() on shared memory allocations - regard them as permanent",
            __FILE__, __LINE__);
 }
 
-void operator delete[] (void*, shm::ShmAllocator &) {
+void operator delete[] (void*/*unused*/, shm::ShmAllocator &/*unused*/) {
   __assert("do not use placement delete[] operator() on shared memory allocations - regard them as permanent",
            __FILE__, __LINE__);
 }

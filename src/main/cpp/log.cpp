@@ -147,10 +147,10 @@ namespace logger {
     const auto len = s_progname.size() + strlen(levelstr);
     const auto buf_extra_size = len + sizeof(CNEWLINE) + sizeof(CNULLTRM);
     int buf_size = DEFAULT_STRBUF_SIZE;
-    int total_buf_size = buf_size + buf_extra_size;
-    char *strbuf = (char*) alloca(total_buf_size);
-    const int msgbuf_size = total_buf_size - buf_extra_size;
-    int n = msgbuf_size;
+    size_t total_buf_size = buf_size + buf_extra_size;
+    auto strbuf = (char*) alloca(total_buf_size);
+    const size_t msgbuf_size = total_buf_size - buf_extra_size;
+    auto n = (int) msgbuf_size;
     va_list parm_copy;
     va_copy(parm_copy, ap);
     {
@@ -158,7 +158,7 @@ namespace logger {
       strcpy(strbuf + s_progname.size(), levelstr);
       n = vsnprintf(strbuf + len, (size_t) n, fmt, ap);
       assert(n > 0);
-      if (n >= msgbuf_size) {
+      if (n >= static_cast<int>(msgbuf_size)) {
         total_buf_size = (buf_size = ++n) + buf_extra_size;
         strbuf = (char*) alloca(total_buf_size);
         strcpy(strbuf, s_progname.c_str());
@@ -189,4 +189,4 @@ namespace logger {
   void logm(LOGGING_LEVEL level, const char * const msg) {
     log(level, "%s", msg);
   }
-}
+} // namespace logger

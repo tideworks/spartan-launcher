@@ -28,10 +28,9 @@ limitations under the License.
 #include "format2str.h"
 #include "findfiles.h"
 
-using logger::log;
 using logger::LL;
 
-bool findfiles(const char * const wrkdir, findfiles_cb_t callback) {
+bool findfiles(const char * const wrkdir, const findfiles_cb_t &callback) {
   DIR * const d = opendir(wrkdir);
   if (d == nullptr) {
     const char * const err_msg_fmt = "could not open specified directory \"%s\":\n\t%s";
@@ -50,9 +49,9 @@ bool findfiles(const char * const wrkdir, findfiles_cb_t callback) {
   std::unique_ptr<DIR, decltype(close_dir)> dir_sp(d, close_dir);
 
   const size_t strbuf_size = 1024;
-  char * const strbuf = (char*) alloca(strbuf_size);
+  auto const strbuf = (char*) alloca(strbuf_size);
 
-  struct stat statbuf;
+  struct stat statbuf{};
   struct dirent *dir;
   bool stop = false;
   while (!stop && (dir = readdir(d)) != nullptr) {

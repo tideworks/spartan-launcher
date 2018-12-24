@@ -30,7 +30,6 @@ limitations under the License.
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
 
-using logger::log;
 using logger::LL;
 
 extern const char * progname();
@@ -152,8 +151,8 @@ namespace cmd_dsp {
 #endif
 
   static void process_jstring_array(JNIEnv *env, jobjectArray jstr_array,
-                                    std::function<void(int)> prepare,
-                                    std::function<void(std::string &)> action)
+                                    const std::function<void(int)> &prepare,
+                                    const std::function<void(std::string &)> &action)
   {
     const auto array_len = env->GetArrayLength(jstr_array);
     if (array_len > 0) {
@@ -371,7 +370,7 @@ namespace cmd_dsp {
   }
 
   jclass CmdDispatchInfoProcessor::extract_method_info(jobject method_info,
-                                                       std::function<void(std::string&, std::string&)> action)
+                                                       const std::function<void(std::string&, std::string&)> &action)
   {
     jclass const meth_info_cls = env->FindClass(class_name); // was set by caller to appropriate MethInfo class name
     if (cls == nullptr) throw 3;
@@ -431,7 +430,7 @@ namespace cmd_dsp {
   }
 
   void CmdDispatchInfoProcessor::extract_method_cmd_info(jclass cmd_info_cls, jobject method_cmd_info,
-                                                         std::function<void(std::string &command)> action)
+                                                         const std::function<void(std::string &command)> &action)
   {
     const auto field_id = env->GetFieldID(cmd_info_cls, "cmd", java_string_descriptor);
 #ifdef NDEBUG
@@ -451,7 +450,7 @@ namespace cmd_dsp {
   }
 
   void CmdDispatchInfoProcessor::extract_method_jvm_optns_cmd_info(jclass cmd_info_cls, jobject method_cmd_info,
-                                                                   std::function<void(std::string &)> action)
+                                                                   const std::function<void(std::string &)> &action)
   {
     auto const defer_jobj = [this](jobject p) { // cleanup of Java objects being locally retrieved and referenced
       if (p != nullptr) {
@@ -569,4 +568,4 @@ namespace cmd_dsp {
     }
     return cmds_set;
   }
-}
+} // namespace cmd_dsp

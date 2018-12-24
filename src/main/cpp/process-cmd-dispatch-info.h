@@ -46,11 +46,11 @@ namespace cmd_dsp {
 #endif
     void apply_cmd_dsp_info_to_session_state(jobject sys_prop_strs, jobject cmd_dispatch_info);
     void extract_main_entry_method_info(jobject cmd_dispatch_info);
-    jclass extract_method_info(jobject method_info, std::function<void(std::string&, std::string&)> action);
+    jclass extract_method_info(jobject method_info, const std::function<void(std::string&, std::string&)> &action);
     void extract_method_cmd_info(jclass cmd_info_cls, jobject method_cmd_info,
-                                 std::function<void(std::string &)> action);
+                                 const std::function<void(std::string &)> &action);
     void extract_method_jvm_optns_cmd_info(jclass cmd_info_cls, jobject method_cmd_info,
-                                           std::function<void(std::string &)> action);
+                                           const std::function<void(std::string &)> &action);
   };
 
   void get_cmd_dispatch_info(sessionState &ss);

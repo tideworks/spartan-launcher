@@ -11,6 +11,7 @@ All rights reserved.
 inih library license: https://raw.githubusercontent.com/benhoyt/inih/master/LICENSE.txt
 
 Enhanced for use of C++11 syntax and features; May 2015, Roger D. Voss
+clang-tidy inspection recommendations applied; Dec 2018, Roger D. Voss
 
 */
 #include <cctype>
@@ -27,45 +28,46 @@ Enhanced for use of C++11 syntax and features; May 2015, Roger D. Voss
 static char* rstrip(char* s)
 {
     char* p = s + strlen(s);
-    while (p > s && isspace((unsigned char)(*--p))) {
+    while (p > s && isspace((unsigned char)(*--p)) != 0) {
         *p = '\0';
     }
     return s;
 }
 
 /* Return pointer to first non-whitespace char in given string. */
-static char* lskip(const char* s)
+static char* lskip(char* s)
 {
-    while (*s && isspace((unsigned char)(*s))) {
+    while (*s != '\0' && isspace((unsigned char)(*s)) != 0) {
         s++;
     }
-    return const_cast<char*>(s);
+    return s;
 }
 
 /* Return pointer to first char c or ';' comment in given string, or pointer to
    null at end of string if neither found. ';' must be prefixed by a whitespace
    character to register as a comment. */
-static char* find_char_or_comment(const char* s, char c)
+static char* find_char_or_comment(char* s, char c)
 {
-    int was_whitespace = 0;
-    while (*s && *s != c && !(was_whitespace && *s == ';')) {
-        was_whitespace = isspace((unsigned char)(*s));
+    bool was_whitespace = false;
+    while (*s != '\0' && *s != c && !(was_whitespace && *s == ';')) {
+        was_whitespace = isspace((unsigned char)(*s)) != 0;
         s++;
     }
-    return const_cast<char*>(s);
+    return s;
 }
 
 /* Version of strncpy that ensures dest (size bytes) is null-terminated. */
 static char* strncpy0(char* dest, unsigned int dest_buf_size, const char* src, size_t size,
-                      std::function<void (int ec,const char* op,int ln)> &error_code)
+                      const err_code_handler_t &/*error_code*/)
 {
-    if (size >= dest_buf_size)
-      size = dest_buf_size - 1;
+    if (size >= dest_buf_size) {
+        size = dest_buf_size - 1;
+    }
     return strncpy(dest, src, size);
 }
 
 /* See documentation in header file. */
-static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_code_handler_t &error_code)
+static int ini_parse_file_core(FILE* file, const cfg_parse_handler_t &handler, const err_code_handler_t &error_code)
 {
     /* Uses a fair bit of stack (use heap instead if you need to) */
     char line[INI_MAX_LINE];
@@ -78,8 +80,6 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
     char* value = nullptr;
     int lineno = 0;
     int error = 0;
-
-
 
     /* Scan through file line by line */
     while (fgets(line, INI_MAX_LINE, file) != nullptr) {
@@ -103,7 +103,7 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
             /* Non-black line with leading whitespace, treat as continuation
                of previous name's value (as per Python ConfigParser). */
             if (!handler(section, prev_name, start) && !error) {
-                error = lineno;
+                error = lineno;size
             }
             else {
               error_code(EILSEQ, __func__, __LINE__);
@@ -118,7 +118,7 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
                 strncpy0(section, MAX_SECTION, start + 1, sizeof(section), error_code);
                 *prev_name = '\0';
             }
-            else if (!error) {
+            else if (error == 0) {
                 /* No ']' found on section line */
                 error = lineno;
             }
@@ -126,7 +126,7 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
               error_code(EILSEQ, __func__, __LINE__);
             }
         }
-        else if (*start && *start != ';') {
+        else if (*start != '\0' && *start != ';') {
             /* Not a comment, must be a name[=:]value pair */
             end = find_char_or_comment(start, '=');
             if (*end != '=') {
@@ -137,16 +137,18 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
                 name = rstrip(start);
                 value = lskip(end + 1);
                 end = find_char_or_comment(value, '\0');
-                if (*end == ';')
+                if (*end == ';') {
                     *end = '\0';
+                }
                 rstrip(value);
 
                 /* Valid name[=:]value pair found, call handler */
                 strncpy0(prev_name, MAX_NAME, name, sizeof(prev_name), error_code);
-                if (!handler(section, name, value) && !error)
+                if (handler(section, name, value) == 0 && error == 0) {
                     error = lineno;
+                }
             }
-            else if (!error) {
+            else if (error == 0) {
                 /* No '=' or ':' found on name[=:]value line */
                 error = lineno;
             }
@@ -156,8 +158,7 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
         }
 
 #if INI_STOP_ON_FIRST_ERROR
-        if (error)
-            break;
+        if (error != 0) { break; }
 #endif
     }
 
@@ -165,18 +166,19 @@ static int ini_parse_file_core(FILE* file, cfg_parse_handler_t &handler, err_cod
 }
 
 /* See documentation in header file. */
-int ini_parse(FILE* file, cfg_parse_handler_t handler, err_code_handler_t error_code)
+int ini_parse(FILE* file, const cfg_parse_handler_t &handler, const err_code_handler_t &error_code)
 {
   return ini_parse_file_core(file, handler, error_code);
 }
 
-int ini_parse(const char* filename, cfg_parse_handler_t handler, err_code_handler_t error_code)
+int ini_parse(const char* filename, const cfg_parse_handler_t &handler, const err_code_handler_t &error_code)
 {
     int error = 0;
     auto const close_file = [&error](FILE *f) {
       if (f != nullptr) {
-        if (fclose(f) != 0)
-          error = errno;
+        if (fclose(f) != 0) {
+            error = errno;
+        }
       }
     };
     FILE* const file = fopen(filename, "r");
@@ -190,7 +192,8 @@ int ini_parse(const char* filename, cfg_parse_handler_t handler, err_code_handle
     if (err != 0) {
         error_code(err, __func__, __LINE__);   // parse file error
         return -1;
-    } else if (error != 0) {
+    }
+    if (error != 0) {
         error_code(error, __func__, __LINE__); // close file error
         return -1;
     }
