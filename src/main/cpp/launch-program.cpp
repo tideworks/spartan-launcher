@@ -323,38 +323,45 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
   }
 
   auto rslt = fork2main(argc, argv, prog_path.c_str(), isExtended);
-  pid_t const pid = std::get<0>(rslt);
+  pid_t const forked_child_pid = std::get<0>(rslt);
   std::string uds_socket_name{ std::move(std::get<2>(rslt)) };
 
   auto rslt2 = obtain_response_stream(uds_socket_name.c_str(), std::move(std::get<1>(rslt)));
   pid_t const child_pid = std::get<0>(rslt2);
-  fd_wrapper_sp_t child_read_fd_sp{ std::move(std::get<1>(rslt2)) };
+  fd_wrapper_sp_t sp_child_rdr_fd{ std::move(std::get<1>(rslt2)) };
+  fd_wrapper_sp_t sp_child_err_fd{ std::move(std::get<2>(rslt2)) };
+  fd_wrapper_sp_t sp_child_wrt_fd{ std::move(std::get<3>(rslt2)) };
 
-  auto const flags = fcntl(child_read_fd_sp->fd, F_GETFL, 0);
-  fcntl(child_read_fd_sp->fd, F_SETFL, flags & ~O_NONBLOCK);
+  auto flags = fcntl(sp_child_rdr_fd->fd, F_GETFL, 0);
+  fcntl(sp_child_rdr_fd->fd, F_SETFL, flags & ~O_NONBLOCK);
+  if (isExtended) {
+    flags = fcntl(sp_child_err_fd->fd, F_GETFL, 0);
+    fcntl(sp_child_err_fd->fd, F_SETFL, flags & ~O_NONBLOCK);
+    flags = fcntl(sp_child_wrt_fd->fd, F_GETFL, 0);
+    fcntl(sp_child_wrt_fd->fd, F_SETFL, flags & ~O_NONBLOCK);
+  }
 
   {
     int status = 0;
     do {
-      if (waitpid(pid, &status, 0) == -1) {
+      if (waitpid(forked_child_pid, &status, 0) == -1) {
         const char err_msg_fmt[] = "failed waiting for forked launcher child process (pid:%d): %s";
-        throw fork_exception(format2str(err_msg_fmt, pid, strerror(errno)));
+        throw fork_exception(format2str(err_msg_fmt, forked_child_pid, strerror(errno)));
       }
       if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
         const char err_msg_fmt[] = "interrupted waiting for forked launcher child process (pid:%d)";
-        throw interrupted_exception(format2str(err_msg_fmt, pid));
+        throw interrupted_exception(format2str(err_msg_fmt, forked_child_pid));
       }
     } while (!WIFEXITED(status) && !WIFSIGNALED(status));
 
     log(LL::DEBUG, "%s(): **** forked launcher child process (pid:%d) of child program subcommand %s completed ****\n",
-        __FUNCTION__, pid, argv[1]);
+        __FUNCTION__, forked_child_pid, argv[1]);
   }
 
   log(LL::DEBUG, "%s(): **** spawned child program subcommand %s pid: %d ****\n", __FUNCTION__, argv[1], child_pid);
 
   // return pid and fd per launched child process
-  return std::make_tuple(child_pid, std::move(child_read_fd_sp),
-                         std::move(std::move(std::get<2>(rslt2))), std::move(std::move(std::get<3>(rslt2))));
+  return std::make_tuple(child_pid, std::move(sp_child_rdr_fd), std::move(sp_child_err_fd), std::move(sp_child_wrt_fd));
 }
 
 static const char * const invoke_child_cmd_errmsg_fmt = "unknown child command: %s";
