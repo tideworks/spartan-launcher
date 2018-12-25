@@ -759,56 +759,29 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
         case WM::GET_STATUS:
         case WM::CHILD_DO_CMD:
         case WM::SUPERVISOR_DO_CMD: {
-            log(LL::DEBUG, "%s() prepare to invoke method taking response stream argument...", __func__);
+          log(LL::DEBUG, "%s() prepare to invoke method taking response stream argument...", __func__);
 
-            // lambda that creates a Java java.io.FileOutputStream object instance and returns it
-            auto const create_file_outputstream = [&,env]() -> jobject {
-              static const char * const fdesc_cls_name = "java/io/FileDescriptor";
-              auto const cls_fdesc = env->FindClass(fdesc_cls_name);
-              if (cls_fdesc == nullptr) {
-                class_name = fdesc_cls_name;
-                throw 3;
-              }
+          auto const make_and_set_fdesc = [env, &class_name, &method_name, &defer_jobj]
+              () -> std::function<defer_jobj_t(int)>
+          {
+            static const char * const fdesc_cls_name = "java/io/FileDescriptor";
+            auto const cls_fdesc = env->FindClass(fdesc_cls_name);
+            if (cls_fdesc == nullptr) {
+              class_name = fdesc_cls_name;
+              throw 3;
+            }
 
-              auto const ctor_fdesc = env->GetMethodID(cls_fdesc, ctor_name, "()V");
-              if (ctor_fdesc == nullptr) {
-                class_name = fdesc_cls_name;
-                method_name = ctor_name;
-                throw 4;
-              }
+            auto const ctor_fdesc = env->GetMethodID(cls_fdesc, ctor_name, "()V");
+            if (ctor_fdesc == nullptr) {
+              class_name = fdesc_cls_name;
+              method_name = ctor_name;
+              throw 4;
+            }
 
-              static const char * const prtstrm_cls_name = "java/io/PrintStream";
-              auto const cls_prtstrm = env->FindClass(prtstrm_cls_name);
-              if (cls_prtstrm == nullptr) {
-                class_name = prtstrm_cls_name;
-                throw 3;
-              }
-
-              auto const ctor_prtstrm = env->GetMethodID(cls_prtstrm, ctor_name, "(Ljava/io/OutputStream;)V");
-              if (ctor_prtstrm == nullptr) {
-                class_name = prtstrm_cls_name;
-                method_name = ctor_name;
-                throw 4;
-              }
-
-              static const char * const file_output_strm_cls_name = "java/io/FileOutputStream";
-              auto const cls_file_output_strm = env->FindClass(file_output_strm_cls_name);
-              if (cls_file_output_strm == nullptr) {
-                class_name = file_output_strm_cls_name;
-                throw 3;
-              }
-
-              auto const ctor_file_output_strm = env->GetMethodID(cls_file_output_strm, ctor_name,
-                                                                  "(Ljava/io/FileDescriptor;)V");
-              if (ctor_file_output_strm == nullptr) {
-                class_name = file_output_strm_cls_name;
-                method_name = ctor_name;
-                throw 4;
-              }
-
+            return [env, &class_name, cls_fdesc, ctor_fdesc, &defer_jobj](const int fd) -> defer_jobj_t {
               // construct a new FileDescriptor
-              defer_jobj_t spFdesc(env->NewObject(cls_fdesc, ctor_fdesc), defer_jobj);
-              if (!spFdesc) {
+              defer_jobj_t sp_fdesc_jobj(env->NewObject(cls_fdesc, ctor_fdesc), defer_jobj);
+              if (!sp_fdesc_jobj) {
                 class_name = fdesc_cls_name;
                 throw 5;
               }
@@ -817,69 +790,109 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
               auto const field_fd = env->GetFieldID(cls_fdesc, "fd", "I");
               assert(field_fd != nullptr);
               if (field_fd == nullptr) throw -1;
-              env->SetIntField(spFdesc.get(), field_fd, (fds_array[0])->fd);
+              env->SetIntField(sp_fdesc_jobj.get(), field_fd, fd);
 
-              defer_jobj_t spObj_file_output_strm(
-                  env->NewObject(cls_file_output_strm, ctor_file_output_strm, spFdesc.get()), defer_jobj);
-              if (!spObj_file_output_strm) {
-                class_name = file_output_strm_cls_name;
-                throw 5;
-              }
-
-              // construct a new FileDescriptor
-              auto const obj_prtstrm = env->NewObject(cls_prtstrm, ctor_prtstrm, spObj_file_output_strm.get());
-              if (obj_prtstrm == nullptr) {
-                class_name = prtstrm_cls_name;
-                throw 5;
-              }
-
-              return obj_prtstrm;
+              return sp_fdesc_jobj;
             };
+          }();
 
-            log(LL::DEBUG, "%s() creating PrintStream object...", __func__);
-            defer_jobj_t spRsp_stream(create_file_outputstream(), defer_jobj);
-            (fds_array[0]).release();
+          auto const make_printstream = [env, &class_name, &method_name, &defer_jobj]
+              (defer_jobj_t &&sp_fdesc_jobj) -> defer_jobj_t
+          {
+            static const char * const prtstrm_cls_name = "java/io/PrintStream";
+            auto const cls_prtstrm = env->FindClass(prtstrm_cls_name);
+            if (cls_prtstrm == nullptr) {
+              class_name = prtstrm_cls_name;
+              throw 3;
+            }
 
-            // invoking command-response method
-            log(LL::DEBUG, "%s() invoking method \"%s\" with PrintStream", __func__, fullMethodName);
-            if (invokeAsStatic) {
-              env->CallStaticVoidMethod(cls, mid, jargs, spRsp_stream.get());
-              break;
-            } else if (which_method == WM::GET_STATUS) {
-              env->CallVoidMethod(mObj, mid, spRsp_stream.get());
-            } else {
-              env->CallVoidMethod(mObj, mid, jargs, spRsp_stream.get());
+            auto const ctor_prtstrm = env->GetMethodID(cls_prtstrm, ctor_name, "(Ljava/io/OutputStream;)V");
+            if (ctor_prtstrm == nullptr) {
+              class_name = prtstrm_cls_name;
+              method_name = ctor_name;
+              throw 4;
             }
-            if (env->ExceptionCheck() != JNI_FALSE) {
-              const auto excptn_str = StdOutCapture::capture_stdout_stderr([env](){ env->ExceptionDescribe(); });
-              auto const excptn_cstr = excptn_str.c_str();
-              log(LL::ERR, "process %d Java method %s() threw exception:\n%s", getpid(), fullMethodName, excptn_cstr);
+
+            static const char * const file_output_strm_cls_name = "java/io/FileOutputStream";
+            auto const cls_file_output_strm = env->FindClass(file_output_strm_cls_name);
+            if (cls_file_output_strm == nullptr) {
+              class_name = file_output_strm_cls_name;
+              throw 3;
             }
-          }
-          break;
-        case WM::SUPERVISOR_SHUTDOWN: {
-            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
-            env->CallVoidMethod(mObj, mid);
-          }
-          break;
-        case WM::CHILD_NOTIFY: {
-            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
-            const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
-            const char* const cmd_line = argv[1];
-            defer_jstr_t spUtf_str(env->NewStringUTF(cmd_line), defer_jstr);
-            if (!spUtf_str) {
-              class_name = "java/lang/String{\"child process command line arguments\"}";
+
+            auto const ctor_file_output_strm = env->GetMethodID(cls_file_output_strm, ctor_name,
+                                                                "(Ljava/io/FileDescriptor;)V");
+            if (ctor_file_output_strm == nullptr) {
+              class_name = file_output_strm_cls_name;
+              method_name = ctor_name;
+              throw 4;
+            }
+
+            auto const f_output_strm = env->NewObject(cls_file_output_strm, ctor_file_output_strm, sp_fdesc_jobj.get());
+            if (f_output_strm == nullptr) {
+              class_name = file_output_strm_cls_name;
               throw 5;
             }
-            env->CallVoidMethod(mObj, mid, pid, spUtf_str.get());
+            defer_jobj_t spObj_file_output_strm{ f_output_strm, defer_jobj };
+
+            // instantiate and construct a new PrintStream object
+            auto const obj_prt_strm = env->NewObject(cls_prtstrm, ctor_prtstrm, spObj_file_output_strm.get());
+            if (obj_prt_strm == nullptr) {
+              class_name = prtstrm_cls_name;
+              throw 5;
+            }
+
+            return { obj_prt_strm, defer_jobj };
+          };
+
+          log(LL::DEBUG, "%s() creating PrintStream object...", __func__);
+          auto spRsp_stream = make_printstream( make_and_set_fdesc((fds_array[0])->fd) );
+          (fds_array[0]).release();
+
+          // invoking command-response method
+          log(LL::DEBUG, "%s() invoking method \"%s\" with PrintStream", __func__, fullMethodName);
+          if (invokeAsStatic) {
+            // invoke a child process sub-command with single response stream (static method entry point)
+            env->CallStaticVoidMethod(cls, mid, jargs, spRsp_stream.get());
+            break; // disregard checking for exceptions thrown by spawned child process
+          }
+          if (which_method == WM::GET_STATUS) {
+            // invoke supervisor process status sub-command with single response stream (instance method entry point)
+            env->CallVoidMethod(mObj, mid, spRsp_stream.get());
+          } else {
+            // invoke supervisor process sub-command with single response stream (instance method entry point)
+            env->CallVoidMethod(mObj, mid, jargs, spRsp_stream.get());
+          }
+          if (env->ExceptionCheck() != JNI_FALSE) {
+            const auto excptn_str = StdOutCapture::capture_stdout_stderr([env](){ env->ExceptionDescribe(); });
+            auto const excptn_cstr = excptn_str.c_str();
+            log(LL::ERR, "process %d Java method %s() threw exception:\n%s", getpid(), fullMethodName, excptn_cstr);
           }
           break;
+        }
+        case WM::SUPERVISOR_SHUTDOWN: {
+          log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
+          env->CallVoidMethod(mObj, mid);
+          break;
+        }
+        case WM::CHILD_NOTIFY: {
+          log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
+          const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
+          const char* const cmd_line = argv[1];
+          defer_jstr_t spUtf_str(env->NewStringUTF(cmd_line), defer_jstr);
+          if (!spUtf_str) {
+            class_name = "java/lang/String{\"child process command line arguments\"}";
+            throw 5;
+          }
+          env->CallVoidMethod(mObj, mid, pid, spUtf_str.get());
+          break;
+        }
         case WM::CHILD_COMPLETION_NOTIFY: {
-            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
-            const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
-            env->CallVoidMethod(mObj, mid, pid);
-          }
+          log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
+          const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
+          env->CallVoidMethod(mObj, mid, pid);
           break;
+        }
         default: // do nothing
           log(LL::WARN, "%s() not valid or known method \"%s\"", __func__, fullMethodName);
           break;
