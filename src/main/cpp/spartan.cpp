@@ -845,23 +845,71 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
             return { obj_prt_strm, defer_jobj };
           };
 
+          auto const make_inputstream = [env, &class_name, &method_name, &defer_jobj]
+              (defer_jobj_t &&sp_fdesc_jobj) -> defer_jobj_t
+          {
+            static const char * const file_input_strm_cls_name = "java/io/FileInputStream";
+            auto const cls_file_input_strm = env->FindClass(file_input_strm_cls_name);
+            if (cls_file_input_strm == nullptr) {
+              class_name = file_input_strm_cls_name;
+              throw 3;
+            }
+
+            auto const ctor_file_input_strm = env->GetMethodID(cls_file_input_strm, ctor_name,
+                                                               "(Ljava/io/FileDescriptor;)V");
+            if (ctor_file_input_strm == nullptr) {
+              class_name = file_input_strm_cls_name;
+              method_name = ctor_name;
+              throw 4;
+            }
+
+            // instantiate and construct a new FileInputStream object
+            auto const obj_input_strm = env->NewObject(cls_file_input_strm, ctor_file_input_strm, sp_fdesc_jobj.get());
+            if (obj_input_strm == nullptr) {
+              class_name = file_input_strm_cls_name;
+              throw 5;
+            }
+
+            return { obj_input_strm, defer_jobj };
+          };
+
           log(LL::DEBUG, "%s() creating PrintStream object...", __func__);
-          auto spRsp_stream = make_printstream( make_and_set_fdesc((fds_array[0])->fd) );
+          auto spRsp_strm = make_printstream( make_and_set_fdesc((fds_array[0])->fd) );
           (fds_array[0]).release();
+
+          const bool is_extended_invoke = fds_array[1] != nullptr && fds_array[2] != nullptr;
 
           // invoking command-response method
           log(LL::DEBUG, "%s() invoking method \"%s\" with PrintStream", __func__, fullMethodName);
           if (invokeAsStatic) {
-            // invoke a child process sub-command with single response stream (static method entry point)
-            env->CallStaticVoidMethod(cls, mid, jargs, spRsp_stream.get());
+            if (!is_extended_invoke) {
+              // invoke a child process sub-command with single response stream (static method entry point)
+              env->CallStaticVoidMethod(cls, mid, jargs, spRsp_strm.get());
+            } else {
+              auto spErrOut_strm = make_printstream( make_and_set_fdesc((fds_array[1])->fd) );
+              (fds_array[1]).release();
+              auto spInput_strm = make_inputstream( make_and_set_fdesc((fds_array[2])->fd) );
+              (fds_array[2]).release();
+              // invoke a child process sub-command with three react streams (static method entry point)
+              env->CallStaticVoidMethod(cls, mid, jargs, spRsp_strm.get(), spErrOut_strm.get(), spInput_strm.get());
+            }
             break; // disregard checking for exceptions thrown by spawned child process
           }
           if (which_method == WM::GET_STATUS) {
             // invoke supervisor process status sub-command with single response stream (instance method entry point)
-            env->CallVoidMethod(mObj, mid, spRsp_stream.get());
+            env->CallVoidMethod(mObj, mid, spRsp_strm.get());
           } else {
-            // invoke supervisor process sub-command with single response stream (instance method entry point)
-            env->CallVoidMethod(mObj, mid, jargs, spRsp_stream.get());
+            if (!is_extended_invoke) {
+              // invoke supervisor process sub-command with single response stream (instance method entry point)
+              env->CallVoidMethod(mObj, mid, jargs, spRsp_strm.get());
+            } else {
+              auto spErrOut_strm = make_printstream( make_and_set_fdesc((fds_array[1])->fd) );
+              (fds_array[1]).release();
+              auto spInput_strm = make_inputstream( make_and_set_fdesc((fds_array[2])->fd) );
+              (fds_array[2]).release();
+              // invoke supervisor process sub-command with three react streams (instance method entry point)
+              env->CallVoidMethod(mObj, mid, jargs, spRsp_strm.get(), spErrOut_strm.get(), spInput_strm.get());
+            }
           }
           if (env->ExceptionCheck() != JNI_FALSE) {
             const auto excptn_str = StdOutCapture::capture_stdout_stderr([env](){ env->ExceptionDescribe(); });
