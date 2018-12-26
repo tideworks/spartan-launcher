@@ -103,7 +103,7 @@ fd_wrapper_sp_t open_write_anon_pipe(string_view const uds_socket_name, int &rc)
   parent_msg.msg_name = &server_address;
   parent_msg.msg_namelen = address_length;
 
-  pipe_fds_buffer_t cmsg_payload{0}; //{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rdr_rd_pipe_sp->fd } };
+  pipe_fds_buffer_t cmsg_payload{}; //{ { 0, SOL_SOCKET, SCM_RIGHTS }, { rdr_rd_pipe_sp->fd } };
   memset(&cmsg_payload, 0, sizeof(cmsg_payload));
 
   cmsg_payload.cmsg.cmsg_len = 0;
@@ -164,19 +164,19 @@ std::tuple<fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> open_react_anon_pi
   fd_wrapper_t wrt_wr_pipe{ std::get<PIPES::WRITE>(pipe_fds) };
   fd_wrapper_sp_t wrt_wr_pipe_sp{ &rdr_rd_pipe, &fd_cleanup_no_delete };
 
-  sockaddr_un server_address{0};
+  sockaddr_un server_address{};
   socklen_t address_length;
 
   send_pid_and_fd_count(uds_socket_name, server_address, socket_fd_sp->fd, rdr_wr_pipe_sp->pid, 3);
 
   init_sockaddr(uds_socket_name, server_address, address_length);
 
-  msghdr parent_msg{nullptr};
+  msghdr parent_msg{};
   memset(&parent_msg, 0, sizeof(parent_msg));
   parent_msg.msg_name = &server_address;
   parent_msg.msg_namelen = address_length;
 
-  pipes_fds_buffer_t cmsg_payload{0}; // { { 0, SOL_SOCKET, SCM_RIGHTS }, { fd1, fd2, fd3 } };
+  pipes_fds_buffer_t cmsg_payload{}; // { { 0, SOL_SOCKET, SCM_RIGHTS }, { fd1, fd2, fd3 } };
   memset(&cmsg_payload, 0, sizeof(cmsg_payload));
 
   cmsg_payload.cmsg.cmsg_len = 0;

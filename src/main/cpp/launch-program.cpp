@@ -114,7 +114,7 @@ namespace launch_program {
       return format2str(err_msg_fmt, sub_cmd, strerror(err_no));
     });
 
-    sockaddr_un server_address{0};
+    sockaddr_un server_address{};
     socklen_t address_length;
     init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
@@ -133,11 +133,11 @@ namespace launch_program {
   {
     static const char* const func_name = __FUNCTION__;
 
-    sockaddr_un server_address{0};
+    sockaddr_un server_address{};
     socklen_t address_length;
     init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
-    pid_buffer_t pid_buffer{0};
+    pid_buffer_t pid_buffer{};
     memset(&pid_buffer, 0, sizeof(pid_buffer));
 
     int line_nbr = __LINE__ + 1;
@@ -163,13 +163,13 @@ namespace launch_program {
 
     init_sockaddr(uds_socket_name.c_str(), server_address, address_length);
 
-    msghdr client_recv_msg{nullptr};
+    msghdr client_recv_msg{};
     memset(&client_recv_msg, 0, sizeof(client_recv_msg));
     client_recv_msg.msg_name = &server_address;
     client_recv_msg.msg_namelen = address_length;
 
-    pipe_fds_buffer_t  cmsg_payload_of_1{0};
-    pipes_fds_buffer_t cmsg_payload_of_3{0};
+    pipe_fds_buffer_t  cmsg_payload_of_1{};
+    pipes_fds_buffer_t cmsg_payload_of_3{};
     if (pid_buffer.fd_rtn_count == 1) {
       memset(&cmsg_payload_of_1, 0, sizeof(cmsg_payload_of_1));
       client_recv_msg.msg_control = &cmsg_payload_of_1;
@@ -296,7 +296,8 @@ static std::tuple<pid_t, fd_wrapper_sp_t, std::string> fork2main(
   if (pid == -1) {
     const char err_msg_fmt[] = "pid(%d): fork() operation of launcher child process failed: %s";
     throw fork_exception(format2str(err_msg_fmt, getpid(), strerror(errno)));
-  } else if (pid == 0) {
+  }
+  if (pid == 0) {
     // is child process
     auto rtn = forkable_main_entry(argc_dup, argv_dup, isExtended); // execute spartan main() through direct call stack
     exit(rtn);
@@ -313,7 +314,7 @@ static std::tuple<pid_t, fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> laun
     prog_path = find_program_path(prog_name, "PATH"); // determine fully qualified path to the program
   } else {
     // verify that the specified program path exist and is a file or symbolic link
-    struct stat statbuf{0};
+    struct stat statbuf{};
     if (stat(prog_name, &statbuf) == -1 || !((statbuf.st_mode & S_IFMT) == S_IFREG ||
                                              (statbuf.st_mode & S_IFMT) == S_IFLNK))
     {
@@ -643,9 +644,9 @@ static jobject JNICALL invoke_spartan_subcommand(
 
   // make sure RAII smart pointers release streaming pipe fd (file descriptors)
   // prior returning to returning to the caller (i.e., don't close them)
-  sp_child_rdr_fd.release();
-  sp_child_err_fd.release();
-  sp_child_wrt_fd.release();
+  (void) sp_child_rdr_fd.release();
+  (void) sp_child_err_fd.release();
+  (void) sp_child_wrt_fd.release();
 
   return invoke_rsp_obj; // instance of spartan.Spartan.InvokeResponse or spartan.Spartan.InvokeResponseEx
 }

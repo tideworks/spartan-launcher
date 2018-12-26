@@ -27,6 +27,7 @@ limitations under the License.
 #include <algorithm>
 #include <popt.h>
 #include <fstream>
+#include "string-view.h"
 #include "log.h"
 #include "format2str.h"
 #include "cfgparse.h"
@@ -40,7 +41,10 @@ limitations under the License.
 using logger::log;
 using logger::LL;
 using logger::is_trace_level;
+
 using launch_program::try_resolve_program_path;
+
+using bpstd::string_view;
 
 const char PATH_SEPARATOR =
 #ifdef _WIN32
@@ -55,7 +59,7 @@ extern const char * progname();
 extern const char * jvm_cmd_line_args();
 
 // will be populated with a value when config.ini file is parsed
-static std::string s_jvm_cmd_line_args;
+static string_view s_jvm_cmd_line_args;
 const char * jvm_cmd_line_args() { return s_jvm_cmd_line_args.c_str(); }
 
 void sessionState::close_libjvm(void *hlibjvm) {
@@ -239,7 +243,7 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
   const char *caught_ex_what = "";
   const char *missing_item = "";
 
-  auto const raise_initialization_exception = [&, cfg_file, jvmlib_path](const WhichInitError which) {
+  auto const raise_initialization_exception = [&, cfg_file](const WhichInitError which) {
     std::string err_msg;
     switch (which) {
       case WIE::MISSING_CFG:
@@ -250,7 +254,7 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
                              cfg_file, caught_ex_name, caught_ex_what);
         break;
       case WIE::MISSING_COMMANDS:
-        err_msg = format2str("\"%s\" missing required setting \"%s\"", cfg_file, missing_item);
+        err_msg = format2str(R"("%s" missing required setting "%s")", cfg_file, missing_item);
         break;
       default:
         err_msg = format2str("unspecified exception processing \"%s\"", cfg_file);
@@ -266,7 +270,7 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
       std::string value, descriptor;
       if (strcasecmp(section, "JvmSettings") == 0) {
         if (strcasecmp(name, "CommandLineArgs") == 0) {
-          s_jvm_cmd_line_args = prepend_to_java_library_path(value_cstr);
+          s_jvm_cmd_line_args = strdup(prepend_to_java_library_path(value_cstr).c_str());
         }
       } else if (strcasecmp(section, "SupervisorProcessSettings") == 0) {
         if (strcasecmp(name, "MainEntryPoint") == 0) {
@@ -491,7 +495,7 @@ static std::ostream& stream_vec_out(std::ostream &os, const std::shared_ptr<std:
   if (self) {
     const auto count = self->size();
     os << count << '\n';
-    for(auto elem : *self) {
+    for(const auto &elem : *self) {
       os << elem << delim;
     }
   } else {
@@ -604,7 +608,7 @@ static std::string prepend_to_java_library_path(const char * const jvm_cmd_line_
   auto const compare_argv_str = [](const char * const str1, const char * const str2) -> const char* {
       char * argv_str_dup = strdupa(str1);
       // convert argv_str_dup to lowercase
-      for(auto p = argv_str_dup; *p; ++p) {
+      for(auto p = argv_str_dup; *p != '\0'; ++p) {
         *p = static_cast<char>(tolower(*p));
       }
       const char *p = strstr(argv_str_dup, str2);

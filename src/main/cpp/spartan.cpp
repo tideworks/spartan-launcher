@@ -160,7 +160,7 @@ static int  invoke_child_process_action(sessionState& session_mut, const char *j
 static int  invoke_child_processor_command(int argc, char **argv, const char *const msg_arg,
                                            JavaVM *const jvmp, const methodDescriptor &method_descriptor);
 
-static auto const shm_allocator_cleanup = [](shm::ShmAllocator *p) {
+static void (* const shm_allocator_cleanup)(shm::ShmAllocator*) = [](shm::ShmAllocator *p) {
   if (p != nullptr) {
     ::delete p;
 #ifdef _DEBUG
@@ -171,7 +171,7 @@ static auto const shm_allocator_cleanup = [](shm::ShmAllocator *p) {
 using shm_allocator_sp_t = std::unique_ptr<shm::ShmAllocator, decltype(shm_allocator_cleanup)>;
 static shm_allocator_sp_t s_shm_allocator_sp(nullptr, shm_allocator_cleanup);
 
-static std::function<int(const char*)> send_supervisor_mq_msg{ [](const char*/*msg*/) -> int { return EXIT_SUCCESS; } };
+static int(*send_supervisor_mq_msg)(const char*) = [](const char*/*msg*/) -> int { return EXIT_SUCCESS; };
 static std::function<void(int)> quit_launcher_on_term_code{ [](int status_code){ _exit(status_code); } };
 static std::function<void(int)> quit_supervisor_on_term_code{ [](int/*status_code*/){} };
 
@@ -353,7 +353,7 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
             } else {
               auto delimiter = std::find(pipe_option.begin(), pipe_option.end(), '=');
               delimiter++;
-              uds_socket_name_arg = std::move(std::string(delimiter, pipe_option.end()));
+              uds_socket_name_arg = std::string(delimiter, pipe_option.end());
               operation = OP::COMMAND;
               do_loop = true; /***** loop through switch again to now process the subcommand *****/
             }
@@ -471,6 +471,10 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
 
 // Handles --STATUS request message as supervisor process; anonymous pipe is
 // obtained opened for write, status result is written to the pipe, and closed
+//
+// NOTE: despite clang-tidy inspection, uds_socket_name should be declared as
+// is because this method is called asynchronously and should therefore own the
+// storage to the string
 static void supervisor_status_response(std::string uds_socket_name, JavaVM *const jvmp,
                                        const methodDescriptor &meth_desc)
 {
@@ -958,7 +962,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
 
           log(LL::DEBUG, "%s() creating PrintStream object...", __func__);
           auto spRsp_strm = make_printstream( make_and_set_fdesc((fds_array[0])->fd) );
-          (fds_array[0]).release();
+          (void) (fds_array[0]).release();
 
           const bool is_extended_invoke = fds_array[1] != nullptr && fds_array[2] != nullptr;
 
@@ -970,9 +974,9 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
               env->CallStaticVoidMethod(cls, mid, jargs, spRsp_strm.get());
             } else {
               auto spErrOut_strm = make_printstream( make_and_set_fdesc((fds_array[1])->fd) );
-              (fds_array[1]).release();
+              (void) (fds_array[1]).release();
               auto spInput_strm = make_inputstream( make_and_set_fdesc((fds_array[2])->fd) );
-              (fds_array[2]).release();
+              (void) (fds_array[2]).release();
               // invoke a child process sub-command with three react streams (static method entry point)
               env->CallStaticVoidMethod(cls, mid, jargs, spRsp_strm.get(), spErrOut_strm.get(), spInput_strm.get());
             }
@@ -987,9 +991,9 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
               env->CallVoidMethod(mObj, mid, jargs, spRsp_strm.get());
             } else {
               auto spErrOut_strm = make_printstream( make_and_set_fdesc((fds_array[1])->fd) );
-              (fds_array[1]).release();
+              (void) (fds_array[1]).release();
               auto spInput_strm = make_inputstream( make_and_set_fdesc((fds_array[2])->fd) );
-              (fds_array[2]).release();
+              (void) (fds_array[2]).release();
               // invoke supervisor process sub-command with three react streams (instance method entry point)
               env->CallVoidMethod(mObj, mid, jargs, spRsp_strm.get(), spErrOut_strm.get(), spInput_strm.get());
             }
@@ -1055,7 +1059,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
       log(LL::ERR, "%s() failed finding Java class \"%s\"",  __func__, class_name);
       break;
     case 4:
-      log(LL::ERR, "%s() failed finding Java method \"%s\" on class \"%s\"", __func__, method_name, class_name);
+      log(LL::ERR, R"(%s() failed finding Java method "%s" on class "%s")", __func__, method_name, class_name);
       break;
     case 5:
       log(LL::ERR, "%s() failed allocating object instance of class \"%s\"", __func__, class_name);
@@ -1128,34 +1132,36 @@ static int supervisor(int argc, char **argv, sessionState& session) {
       supervisor_jvm_context{-1};
   using supervisor_jvm_context_t = decltype(supervisor_jvm_context);
 
-  auto const cleanup_supervisor_jvm_ctx = [&](supervisor_jvm_context_t *p) {
-    static const char func_name[] = "cleanup_supervisor_jvm_ctx";
-    session.libjvm_sp.release();
-    if (p != nullptr) {
-      const auto curr_pid = getpid();
-      if (p->pid > 0) {
-        shutting_down = true;
-        set_exit_flag_true();
-        const auto jsupervisor_queue_name = get_jsupervisor_mq_queue_name(progname());
-        exit_code = send_mq_msg::send_mq_msg(SHUTDOWN_CMD.c_str(), jsupervisor_queue_name.c_str());
-        // waitid on all forked child processes - including the supervisor JVM process
-        waitid_on_forked_children(std::function<bool()>([&child_process_count]() -> bool {
-          return (child_process_count--) <= 0;
-        }));
-        mq_unlink(jsupervisor_queue_name.c_str());
-        log(LL::TRACE, "unlinked mq queue '%s' - process pid(%d)", jsupervisor_queue_name.c_str(), curr_pid);
-      } else if (p->pid == 0) {
-        if (p->jvm_thrd.joinable()) {
-          p->jvm_thrd.join();
+  auto const cleanup_supervisor_jvm_ctx =
+      [&session, &exit_code, &jvm_exit, &child_process_count, &waitid_on_forked_children](supervisor_jvm_context_t *p)
+      {
+        static const char func_name[] = "cleanup_supervisor_jvm_ctx";
+        (void) session.libjvm_sp.release();
+        if (p != nullptr) {
+          const auto curr_pid = getpid();
+          if (p->pid > 0) {
+            shutting_down = true;
+            set_exit_flag_true();
+            const auto jsupervisor_queue_name = get_jsupervisor_mq_queue_name(progname());
+            exit_code = send_mq_msg::send_mq_msg(SHUTDOWN_CMD.c_str(), jsupervisor_queue_name.c_str());
+            // waitid on all forked child processes - including the supervisor JVM process
+            waitid_on_forked_children(std::function<bool()>([&child_process_count]() -> bool {
+              return (child_process_count--) <= 0;
+            }));
+            mq_unlink(jsupervisor_queue_name.c_str());
+            log(LL::TRACE, "unlinked mq queue '%s' - process pid(%d)", jsupervisor_queue_name.c_str(), curr_pid);
+          } else if (p->pid == 0) {
+            if (p->jvm_thrd.joinable()) {
+              p->jvm_thrd.join();
+            }
+            exit_code = jvm_exit;
+            (void) session.env_sp.release();
+            (void) session.jvm_sp.release();
+            (void) session.libjvm_sp.release();
+          }
+          log(LL::DEBUG, "<< %s(%d) - process pid(%d)", func_name, p->pid, curr_pid);
         }
-        exit_code = jvm_exit;
-        session.env_sp.release();
-        session.jvm_sp.release();
-        session.libjvm_sp.release();
-      }
-      log(LL::DEBUG, "<< %s(%d) - process pid(%d)", func_name, p->pid, curr_pid);
-    }
-  };
+      };
 
   std::unique_ptr<supervisor_jvm_context_t, decltype(cleanup_supervisor_jvm_ctx)> supervisor_jvm_context_sp(
       &supervisor_jvm_context,
@@ -1373,7 +1379,7 @@ try_again:
       // will inform Java main() program of forked child process
       supervisor_child_processor_notify(pid, msg_str.c_str());
     } else {
-      mqd_sp.release(); // don't want a forked child process to unlink the mq queue
+      (void) mqd_sp.release(); // don't want a forked child process to unlink the mq queue
 
       sessionState shm_session_st;
       cmd_dsp::get_cmd_dispatch_info(shm_session_st);
@@ -1517,7 +1523,7 @@ try_again:
           if (lk.try_lock_for(std::chrono::seconds(3))) {
             qcv.wait_for(lk, std::chrono::seconds(2), [&,child_process_max_count] {
               count_headroom = child_process_max_count - child_process_count.load();
-              return  qready.load() && count_headroom > 0;
+              return qready.load() && count_headroom > 0;
             });
             qready.store(false);
             const int queue_count = (int) dispatch_msg_queue.size();
@@ -1551,24 +1557,23 @@ try_again:
 
   /* lambda that enqueues an mq popped message onto a C++11 work queue; a queued msg will be the */
   /* command line args to a Java method invoked on the supervisor or on a forked child process   */
-  auto const en_queue_dispatch_msg = [&](const char * const msg) -> processor_result_t {
+  auto const en_queue_dispatch_msg = [&dispatch_msg_queue, &qready](const char* const msg) -> processor_result_t {
     std::unique_lock<std::timed_mutex> lk(qm, std::defer_lock);
     if (lk.try_lock_for(std::chrono::seconds(5))) {
       dispatch_msg_queue.emplace(std::string(msg));
       qready.store(true);
       qcv.notify_one();
       return processor_result_t(true, EXIT_SUCCESS); // continue processing mq messages
-    } else {
-      log(LL::ERR, "failed to acquire lock to enqueue mq msg '%s'", msg);
-      return processor_result_t(false, EXIT_FAILURE); // cease processing mq messages and terminate program
     }
+    log(LL::ERR, "failed to acquire lock to enqueue mq msg '%s'", msg);
+    return processor_result_t(false, EXIT_FAILURE); // cease processing mq messages and terminate program
   };
 
   using msg_dispatch_t = std::function<processor_result_t(char [], const int)>;
 
   // lambda (with closure) that processes an mq message for launcher process - typically a dispatch to a handler
-  msg_dispatch_t const msg_dispatch_for_launcher = [argc, argv, &en_queue_dispatch_msg, &session]
-      (char buffer[], const int msg_size) -> processor_result_t
+  msg_dispatch_t const msg_dispatch_for_launcher = [&en_queue_dispatch_msg]
+      (const char* const buffer, const int msg_size) -> processor_result_t
   {
     const char * const msg_dup = strndupa(buffer, (size_t) msg_size);
 
@@ -1582,8 +1587,8 @@ try_again:
   };
 
   // lambda (with closure) that processes an mq message for supervisor process - typically a dispatch to a handler
-  msg_dispatch_t const msg_dispatch_for_supervisor = [argc, argv, &en_queue_dispatch_msg, &shm_session]
-      (char buffer[], const int msg_size) -> processor_result_t
+  msg_dispatch_t const msg_dispatch_for_supervisor = [&en_queue_dispatch_msg, &shm_session]
+      (const char* const buffer, const int msg_size) -> processor_result_t
   {
     static const char func_name[] = "msg_dispatch_for_supervisor";
     const char * const msg_dup = strndupa(buffer, (size_t) msg_size);
@@ -1595,7 +1600,8 @@ try_again:
         log(LL::ERR, "%s() did not complete command %s successfully", func_name, msg_dup);
       }
       return processor_result_t(false, ec); // complete exiting activity of parent supervisor process
-    } else if (strncmp(msg_dup, STATUS_CMD.c_str(), STATUS_CMD.size()) == 0) {
+    }
+    if (strncmp(msg_dup, STATUS_CMD.c_str(), STATUS_CMD.size()) == 0) {
       if (!(flag != 0 || shutting_down || jvm_shutting_down)) {
         log(LL::INFO, "received: \"%s\"", msg_dup);
         static const char *const delim = " ";
@@ -1632,12 +1638,12 @@ try_again:
     if (ern == ETIMEDOUT) {
       if (flag != 0) {// check to see if signaled to terminate
         break;
-      } else {
-        clock_gettime(CLOCK_REALTIME, &timeout);
-        timeout.tv_sec += timeout_interval;
-        continue;
       }
-    } else if (ern != 0) {
+      clock_gettime(CLOCK_REALTIME, &timeout);
+      timeout.tv_sec += timeout_interval;
+      continue;
+    }
+    if (ern != 0) {
       log(LL::ERR, "mq_receive returned error: %s", strerror(ern));
       mqd_sp.reset(nullptr);
       auto prcsr_rslt = processor_result_t(false, EXIT_FAILURE);
@@ -1728,7 +1734,7 @@ static int invoke_child_process_action(sessionState &session_mut, const char *jv
       auto const env = session_mut.env_sp.release();
       auto const jvm = session_mut.jvm_sp.release();
       jni_detach_thread(jvm, env);
-      session_mut.libjvm_sp.release();
+      (void) session_mut.libjvm_sp.release();
       // invoke the processing logic of the forked child process and return its exit code
       exit_code = action(session_mut, jvm);
     }

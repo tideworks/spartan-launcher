@@ -119,7 +119,7 @@ public:
                                std::string && jvm_optns, bool is_static_method, WhichMethod which)
       : methodDescriptor(std::move(full_method_name), std::move(descriptor), is_static_method, which),
         command(std::move(cmd)), jvmOptionsCommandLine(std::move(jvm_optns)) {}
-  methodDescriptorCmd(const methodDescriptorCmd &md) { *this = md; }
+  methodDescriptorCmd(const methodDescriptorCmd &md) { this->operator=(md); }
   methodDescriptorCmd(methodDescriptorCmd &&md) noexcept { *this = std::move(md); }
   methodDescriptorCmd & operator=(const methodDescriptorCmd &md);
   methodDescriptorCmd & operator=(methodDescriptorCmd &&md) noexcept;
