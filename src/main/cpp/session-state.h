@@ -140,6 +140,7 @@ private:
   static void cleanup_jnienv(JNIEnv*);
 
 public:
+  pid_t supervisor_pid{0};
   short int child_process_max_count{0};
   methodDescriptor spartanMainEntryPoint;
   methodDescriptor spartanGetStatusEntryPoint;

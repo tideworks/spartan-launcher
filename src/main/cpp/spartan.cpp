@@ -133,7 +133,8 @@ using defer_jstr_sp_t = std::unique_ptr<_jstring, T>;
 
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
                                  const send_mq_msg_cb_t &send_mq_msg_cb);
-static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp);
+static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp,
+                                       const pid_t supervisor_pid = -1);
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &method_descriptor,
                               std::array<fd_wrapper_sp_t, 3> &&fds_array,
                               int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr);
@@ -436,7 +437,8 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
             // proceed to handle the response output stream appropriately
             if (exit_code == EXIT_SUCCESS && uds_socket_name_arg.empty()) {
               // there is no caller of Spartan.InvokeCommand() APIs so handle response stream right here
-              exit_code = stdout_echo_response_stream(uds_socket_name, std::move(socket_read_fd_sp));
+              exit_code = stdout_echo_response_stream(uds_socket_name, std::move(socket_read_fd_sp),
+                                                      shm_session.supervisor_pid);
             }
             break;
           }
@@ -511,25 +513,89 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
   return rtn == EXIT_SUCCESS ? stdout_echo_response_stream(uds_socket_name, std::move(socket_fd_sp)) : rtn;
 }
 
-static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp) {
-  auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
-  fd_wrapper_sp_t fd_sp{ std::move(std::get<1>(rslt)) };
-  auto const fd = fd_sp->fd;
+// NOTE: due to use of privately declared static variables, this function is not
+// thread re-entrant - but that is okay for this function as it is called only in
+// spartarn client mode as very last step or processing response output to stdout
+static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp,
+                                       const pid_t supervisor_pid)
+{
+  static struct { // state needed for access in signal handler below
+    pid_t child_prcs_pid{0};
+    pid_t supervisor_pid{0};
+    int err_fd{-1};
+    int wrt_fd{-1};
+  } s_sig_state; // use of statics means is not thread re-entrant but that is okay for this function
 
-  auto const handle_fd_error = [fd, &uds_socket_name](int err_no) {
-    log(LL::ERR, "failure reading pipe fd{%d} via uds socket %s:\n\t%s", fd, uds_socket_name.c_str(), strerror(err_no));
+  auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
+  s_sig_state.child_prcs_pid = std::get<0>(rslt);
+  s_sig_state.supervisor_pid = supervisor_pid;
+  fd_wrapper_sp_t sp_rsp_fd{ std::move(std::get<1>(rslt)) };
+  fd_wrapper_sp_t sp_err_fd{ std::move(std::get<2>(rslt)) };
+  fd_wrapper_sp_t sp_wrt_fd{ std::move(std::get<3>(rslt)) };
+  const bool is_extended_invoke = sp_err_fd != nullptr && sp_wrt_fd != nullptr;
+  if (is_extended_invoke) {
+    s_sig_state.err_fd = sp_err_fd->fd;
+    s_sig_state.wrt_fd = sp_wrt_fd->fd;
+  }
+
+  while ((dup2(sp_rsp_fd->fd, STDIN_FILENO) == -1) && (errno == EINTR)) {}
+  sp_rsp_fd.reset(nullptr); // now close this file descriptor as has been duplicated to the stdin file descriptor
+
+  // register a Ctrl-C SIGINT handler that will exit the program
+  signal(SIGINT, [](int/*sig*/) {
+    signal(SIGINT, SIG_IGN);
+    if (s_sig_state.child_prcs_pid != 0 && s_sig_state.child_prcs_pid != s_sig_state.supervisor_pid) {
+      close(STDIN_FILENO);
+      fflush(stdout);
+      close(STDOUT_FILENO);
+      // need to close these file descriptors here as calling exit() below will bypass RAII smart pointer destructors
+      if (s_sig_state.err_fd != -1) {
+        close(s_sig_state.err_fd);
+        fflush(stderr);
+        close(STDERR_FILENO);
+      }
+      if (s_sig_state.wrt_fd != -1) {
+        close(s_sig_state.wrt_fd);
+      }
+      kill(s_sig_state.child_prcs_pid, SIGTERM); // signal the child process at other end of pipe to terminate
+      // now wait for the child process to terminate
+      int status = 0;
+      do {
+        if (waitpid(s_sig_state.child_prcs_pid, &status, 0) == -1) {
+          if (errno != ECHILD) {
+            fprintf(stderr, "%s: ERROR: failed waiting for child process (pid:%d): %s\n",
+                    progname(), s_sig_state.child_prcs_pid, strerror(errno));
+          }
+          break;
+        }
+        if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
+          fprintf(stderr, "%s: ERROR: interrupted waiting for child process (pid:%d)\n",
+                  progname(), s_sig_state.child_prcs_pid);
+          break;
+        }
+      } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+      exit(EXIT_FAILURE); // consider a Ctrl-C interruption a failure status for process exiting
+    } else if (s_sig_state.supervisor_pid != -1) {
+      fprintf(stderr, "%s: ERROR: can't Ctrl-C interrupt echoing output of supervisor sub-command to stdout\n",
+              progname());
+    }
+  });
+
+  auto const handle_fd_error = [&uds_socket_name](const int fd, const int err_no) {
+    log(LL::ERR, "failure reading pipe fd{%d} obtained via uds socket %s:\n\t%s",
+        fd, uds_socket_name.c_str(), strerror(err_no));
   };
 
-  unsigned long long n_read = 0, n_writ = 0;
+  using ullint = unsigned long long;
 
   // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
   // - reads from file descriptor input until it is closed (or error)
-  auto rtn = [&n_read, &n_writ, &handle_fd_error](int in_fd, FILE *out_stream) -> int {
-    char iobuf[512];
+  auto const echo = [&handle_fd_error](const int in_fd, FILE* const out_stream, ullint &n_read, ullint &n_writ) -> int {
+    char iobuf[1024];
     for (; ;) {
       const auto n = read(in_fd, iobuf, sizeof(iobuf));
       if (n == -1) {
-        handle_fd_error(errno);
+        handle_fd_error(in_fd, errno);
         return EXIT_FAILURE;
       }
       if (n <= 0) {
@@ -546,11 +612,28 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
       }
     }
     return EXIT_SUCCESS;
-  }(fd_sp->fd, stdout); // will echo read pipe data to stdout
+  };
 
-  log(LL::DEBUG, "%s() -> %Lu read, %Lu written", __FUNCTION__, n_read, n_writ);
+  std::future<int> fut{};
+  ullint n_err_read{0}, n_err_writ{0};
 
-  fd_sp.reset(nullptr); // explicitly invoke response stream fd cleanup
+  if (is_extended_invoke) {
+    std::packaged_task<int(int, FILE*, ullint&, ullint&)> async_echo_task{ echo };
+    fut = async_echo_task.get_future();
+    std::thread thrd{ std::move(async_echo_task), sp_err_fd->fd, stderr, std::ref(n_err_read), std::ref(n_err_writ) };
+    thrd.detach();
+  }
+
+  ullint n_read{0}, n_writ{0};
+
+  auto rtn = echo(STDIN_FILENO, stdout, n_read, n_writ); // will echo read pipe data to stdout
+
+  log(LL::DEBUG, "%s() -> %Lu read, stdout %Lu written", __FUNCTION__, n_read, n_writ);
+
+  if (is_extended_invoke) {
+    fut.wait(); // Wait until the async stderr-handling echo() lambda completes
+    log(LL::DEBUG, "%s() -> %Lu read, stderr %Lu written", __FUNCTION__, n_err_read, n_err_writ);
+  }
 
   return rtn != EXIT_SUCCESS ? EXIT_FAILURE : EXIT_SUCCESS;
 }
@@ -1095,6 +1178,7 @@ static int supervisor(int argc, char **argv, sessionState& session) {
       is_launcher_process = false;
       signal(SIGINT, SIG_IGN);
       mq_queue_name = get_jsupervisor_mq_queue_name(progname());
+      session.supervisor_pid = getpid();
       session.create_jvm(); // create the Java JVM for the supervisor process
       signal(SIGINT, [](int){
         jvm_shutting_down = true;
@@ -1104,7 +1188,7 @@ static int supervisor(int argc, char **argv, sessionState& session) {
       std::promise<void> prom;
       auto fut = prom.get_future();
 
-      auto const invoke_jvm_entrypoint = [&jvm_exit, &session, &shm_session, argc, argv](std::promise<void> prom_rref) {
+      auto const invoke_jvm_entrypoint = [&jvm_exit, &session, argc, argv](std::promise<void> prom_rref) {
 
         auto const action = [&prom_rref, argc, argv](sessionState &session_param, JavaVM *const jvm) -> int {
           methodDescriptor obtainSerializedAnnotationInfo(

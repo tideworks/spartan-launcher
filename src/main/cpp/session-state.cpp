@@ -444,6 +444,7 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
 
 // Does a copy of the information part of sessionState only.
 sessionState & sessionState::clone_info_part(const sessionState &ss) noexcept {
+  supervisor_pid = ss.supervisor_pid;
   child_process_max_count = ss.child_process_max_count;
   spartanMainEntryPoint = ss.spartanMainEntryPoint;
   spartanGetStatusEntryPoint = ss.spartanGetStatusEntryPoint;
@@ -538,6 +539,7 @@ static std::istream& stream_vec_in(std::istream &is, std::shared_ptr<std::vector
 std::ostream& operator << (std::ostream &os, const sessionState &self) {
   using self_t = std::remove_reference<decltype(self)>::type;
   os << typeid(self_t).name() << '\n';
+  os << self.supervisor_pid << '\n';
   os << self.child_process_max_count << '\n';
   os << self.spartanMainEntryPoint << '\n';
   os << self.spartanGetStatusEntryPoint << '\n';
@@ -559,8 +561,10 @@ std::ostream& operator << (std::ostream &os, const sessionState &self) {
 std::istream& operator >> (std::istream &is, sessionState &self) {
   std::string type_name;
   std::getline(is, type_name, '\n');
-  is >> self.child_process_max_count;
+  is >> self.supervisor_pid;
   char newline;
+  is.getline(&newline, 1);
+  is >> self.child_process_max_count;
   is.getline(&newline, 1);
   is >> self.spartanMainEntryPoint;
   is.getline(&newline, 1);
