@@ -31,7 +31,6 @@ import java.io.LineNumberReader;
 import java.io.ObjectInputStream;
 import java.io.PrintStream;
 import java.io.PrintWriter;
-import java.lang.reflect.Method;
 import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.nio.file.FileSystems;
@@ -39,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -54,6 +54,7 @@ import spartan.annotations.SupervisorMain;
 public final class test extends SpartanBase {
   private static final String clsName = test.class.getName();
   private static final String methodEntryExitFmt = "%s %s.%s(): @@@@@ %s test and print diagnostics output @@@@@%n";
+  private static final String runForeverOptn = "-run-forever";
   private static final AtomicInteger workerThreadNbr = new AtomicInteger(1);
   private static final ExecutorService workerThread = Executors.newCachedThreadPool(r -> {
     final Thread t = new Thread(r);
@@ -115,37 +116,68 @@ public final class test extends SpartanBase {
     rspStream.printf("invoked %s.%s(\"%s\")%n", test.class.getName(), methodName, output);
   }
 
-  @SupervisorCommand("RUNGENESIS")
-  public void runGenesis(String[] args, PrintStream rspStream) {
-    final String methodName = "runGenesis";
+  @SupervisorCommand("GENFIB")
+  public void generateFibonacciSequence(String[] args, PrintStream rspStream) {
+    final String methodName = "generateFibonacciSequence";
+    assert (args.length > 0);
+
     try (final PrintStream rsp = rspStream) {
-      assert(args.length > 0);
       print_method_call_info(rsp, methodName, args);
+
+      final double maxCeiling = args.length > 1 ? Double.parseDouble(args[1]) : 30 /* default */;
+
+      int count = 0;
+      double j = 0, i = 1;
+      rsp.print(j);
+      rsp.println();
+      count++;
+      if (maxCeiling <= j) return;
+      rsp.print(i);
+      rsp.println();
+      count++;
+      if (maxCeiling == i) return;
+      for(;;) {
+        double tmp = i;
+        i += j;
+        j = tmp;
+        if (i > maxCeiling) break;
+        rsp.print(i);
+        rsp.println();
+        count++;
+      }
+
+      rsp.printf("%ngenerated %d values%n", count);
+    } catch(Throwable e) {
+      e.printStackTrace(rspStream);
     }
   }
 
   @SupervisorCommand("INVOKECHILDCMD")
-  public void invokeChildCmd(String[] args, PrintStream rspStream) {
+  public void invokeChildCmd(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "invokeChildCmd";
-    try {
-      assert(args.length > 0);
-      print_method_call_info(rspStream, methodName, args);
+    assert args.length > 0;
+
+    try (final InputStream inStrm = inStream)  {
+      print_method_call_info(errStream, methodName, args);
       if (args.length < 2) {
-        rspStream.println("ERROR: no child command specified - insufficient commandline arguments");
+        errStream.println("ERROR: no child command specified - insufficient commandline arguments");
         return;
       }
       if (args[0].equalsIgnoreCase(args[1])) {
-        rspStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
+        errStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
         return;
       }
       final InvokeResponse rtn = Spartan.invokeCommand(Arrays.copyOfRange(args, 1, args.length));
       _pids.add(rtn.childPID);
-      final InputStream childInputStrm = rtn.inStream;
-      final PrintStream rspOutput = rspStream; // the task will take ownership of the response stream
-      rspStream = null;
+      final InputStream childInStrm = rtn.inStream;
+      // the async task will take ownership of these writeable streams
+      final PrintStream rspOutput = outStream;
+      outStream = null;
+      final PrintStream errStrm = errStream;
+      errStream = null;
       // Asynchronously consume output from the invoked command and write it to the response stream
       workerThread.execute(() -> {
-        try (final LineNumberReader lineRdr = new LineNumberReader(new InputStreamReader(childInputStrm), 1024 * 2)) {
+        try (final LineNumberReader lineRdr = new LineNumberReader(new InputStreamReader(childInStrm), 1024 * 2)) {
           try (final PrintStream rsp = rspOutput) {
             CharSequence line;
             while ((line = lineRdr.readLine()) != null) {
@@ -159,41 +191,110 @@ public final class test extends SpartanBase {
         } catch (Throwable e) {
           final CharArrayWriter memBufWrtr = new CharArrayWriter(1024);
           e.printStackTrace(new PrintWriter(memBufWrtr));
+          final String stackTrace = memBufWrtr.toString();
+          errStrm.println(stackTrace);
           log(LL_ERR, () ->
-              format("%s exception so exiting thread:%n%s%n", Thread.currentThread().getName(), memBufWrtr.toString())
-            );
+                format("%s exception so exiting thread:%n%s%n", Thread.currentThread().getName(), stackTrace)
+          );
         }
       });
-    } catch (Exception e) {
-      uncheckedExceptionThrow(e);
+    } catch (Throwable e) {
+      final PrintStream errOut = errStream != null ? errStream : System.err;
+      e.printStackTrace(errOut);
     } finally {
-      if (rspStream != null) {
-        rspStream.close();
+      if (outStream != null) {
+        try {
+          outStream.close();
+        } catch (Exception ignore) {}
+      }
+      if (errStream != null) {
+        try {
+          errStream.close();
+        } catch (Exception ignore) {}
       }
     }
   }
 
-  @ChildWorkerCommand(cmd="GENESIS", jvmArgs={"-server", "-Xms128m", "-Xmx512m"})
-  public static void doGenesisEtl(String[] args, PrintStream rspStream) {
-    final String methodName = "doGenesisEtl";
-    try (final PrintStream rsp = rspStream) {
-      assert(args.length > 0);
-      print_method_call_info(rsp, methodName, args);
-      final Class<?> testSpartanCls = Class.forName("TestSpartan");
-      final Method childWorkerDoCommand = testSpartanCls.getMethod("childWorkerDoCommand", String[].class,
-          PrintStream.class);
-      childWorkerDoCommand.invoke(null, args, rsp);
-    } catch (Exception e) {
-      uncheckedExceptionThrow(e);
+  private static void generateDummyTestOutput(final String inputFilePath, PrintStream rspStream, boolean runForever) {
+    final String msg = format("%s.generateDummyTestOutput(%s)", clsName, inputFilePath);
+    log(LL_DEBUG, ()->msg);
+
+    // test code - writes some text data to response stream and closes it
+    rspStream.printf("DEBUG: %s%n", msg);
+    rspStream.flush();
+    final java.util.Random rnd = new java.util.Random();
+    for(int i = 0; runForever || i < 30;) {
+      int n = rnd.nextInt(1000);
+      if (n <= 0) {
+        n = 100;
+      }
+      try {
+        Thread.sleep(n);
+      } catch(InterruptedException e) {
+        break;
+      }
+      rspStream.printf("DEBUG: test message #%d - duration %d ms%n", i, n);
+      if (++i < 0) {
+        i = 0; // set back to a non negative integer (wrapping happens if running in forever mode)
+      }
     }
   }
 
-  @ChildWorkerCommand(cmd="CDC")
-  public static void doCdcEtl(String[] args, PrintStream rspStream) {
-    final String methodName = "doCdcEtl";
-    try (final PrintStream rsp = rspStream) {
-      assert(args.length > 0);
-      print_method_call_info(rsp, methodName, args);
+  private static void invokeGenerateDummyTestOutput(String[] args, PrintStream rspStream, PrintStream errStream) {
+    assert args.length > 0;
+    final String cmd = args[0];
+    if (args.length > 1) {
+      final Set<String> argsSet = new LinkedHashSet<>(Arrays.asList(args));
+      final boolean runForever = argsSet.remove(runForeverOptn);
+      argsSet.remove(cmd);
+      final String[] remain_args = argsSet.toArray(new String[0]);
+      final String input_string = format("\"%s\"", String.join("\" \"", remain_args));
+      generateDummyTestOutput(input_string, rspStream, runForever);
+    } else {
+      final String errmsg = format("%s child worker has no input JSON filepath specified to process", cmd.toLowerCase());
+      errStream.printf("ERROR: %s%n", errmsg);
+      log(LL_ERR, ()->errmsg);
     }
+  }
+
+  @ChildWorkerCommand(cmd = "GENESIS", jvmArgs = {"-server", "-Xms96m", "-Xmx256m"})
+  public static void doGenesisEtl(String[] args, PrintStream rspStream) {
+    final String methodName = "doGenesisEtl";
+    System.setOut(rspStream);
+    assert (args.length > 0);
+
+    int exit_code = 0;
+    try {
+      print_method_call_info(System.out, methodName, args);
+      invokeGenerateDummyTestOutput(args, System.out, System.out);
+    } catch (Throwable e) {
+      e.printStackTrace(System.out);
+      exit_code = 1;
+    }
+    System.exit(exit_code);
+  }
+
+  @ChildWorkerCommand(cmd = "CDC", jvmArgs = {"-server", "-Xms96m", "-Xmx256m"})
+  public static void doCdcEtl(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
+    final String methodName = "doCdcEtl";
+    System.setOut(outStream);
+    System.setErr(errStream);
+    System.setIn(inStream);
+    assert (args.length > 0);
+
+    final String cmd_lc = args[0].toLowerCase();
+    final String pidFileBaseName = String.join("-", test.class.getSimpleName().toLowerCase(), cmd_lc);
+
+    int exit_code = 0;
+    if (Spartan.isFirstInstance(pidFileBaseName)) {
+      try {
+        print_method_call_info(System.err, methodName, args); // write diagnostic info to stderr
+        invokeGenerateDummyTestOutput(args, System.out, System.err);
+      } catch (Throwable e) {
+        e.printStackTrace(System.err);
+        exit_code = 1;
+      }
+    }
+    System.exit(exit_code);
   }
 }
