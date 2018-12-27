@@ -44,6 +44,8 @@ limitations under the License.
 #include "log.h"
 #include "StdOutCapture.h"
 #include "open-anon-pipes.h"
+#include "read-multi-strm.h"
+#include "read-on-ready.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
@@ -524,123 +526,139 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp,
                                        const pid_t supervisor_pid)
 {
-  static struct { // state needed for access in signal handler below
-    pid_t child_prcs_pid{0};
-    pid_t supervisor_pid{0};
-    int err_fd{-1};
-    int wrt_fd{-1};
-  } s_sig_state; // use of statics means is not thread re-entrant but that is okay for this function
+  int rtn = EXIT_SUCCESS;
 
   auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
-  s_sig_state.child_prcs_pid = std::get<0>(rslt);
-  s_sig_state.supervisor_pid = supervisor_pid;
+  const pid_t child_prcs_pid = std::get<0>(rslt);
   fd_wrapper_sp_t sp_rsp_fd{ std::move(std::get<1>(rslt)) };
   fd_wrapper_sp_t sp_err_fd{ std::move(std::get<2>(rslt)) };
   fd_wrapper_sp_t sp_wrt_fd{ std::move(std::get<3>(rslt)) };
   const bool is_extended_invoke = sp_err_fd != nullptr && sp_wrt_fd != nullptr;
+
   if (is_extended_invoke) {
-    s_sig_state.err_fd = sp_err_fd->fd;
-    s_sig_state.wrt_fd = sp_wrt_fd->fd;
-  }
+    read_multi_stream rms;
+    try {
+      rms += std::make_tuple(sp_rsp_fd->fd, sp_err_fd->fd, STDIN_FILENO);
+    } catch (const stream_ctx_exception &ex) {
+      log(LL::ERR, "%d: %s(): failed init read_multi_stream with fds obtained via uds socket %s:\n\t%s: %s",
+          __LINE__, __FUNCTION__, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
+      rtn = EXIT_FAILURE;
+    }
+    if (rtn == EXIT_SUCCESS) {
+      auto const wrt_strm = fdopen(sp_wrt_fd->fd, "w");
+      if (wrt_strm == nullptr) {
+        log(LL::ERR, "%d: %s(): fdopen() failed to open stdin fd{%d} obtained via uds socket %s:\n\t%s",
+            __LINE__, __FUNCTION__, sp_wrt_fd->fd, uds_socket_name.c_str(), strerror(errno));
+        rtn = EXIT_FAILURE;
+      } else {
+        std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{wrt_strm, &::fclose};
+        (void) sp_wrt_fd.release();
 
-  while ((dup2(sp_rsp_fd->fd, STDIN_FILENO) == -1) && (errno == EINTR)) {}
-  sp_rsp_fd.reset(nullptr); // now close this file descriptor as has been duplicated to the stdin file descriptor
+        output_streams_context_map_t output_streams_map;
 
-  // register a Ctrl-C SIGINT handler that will exit the program
-  signal(SIGINT, [](int/*sig*/) {
-    signal(SIGINT, SIG_IGN);
-    if (s_sig_state.child_prcs_pid != 0 && s_sig_state.child_prcs_pid != s_sig_state.supervisor_pid) {
-      close(STDIN_FILENO);
-      fflush(stdout);
-      close(STDOUT_FILENO);
-      // need to close these file descriptors here as calling exit() below will bypass RAII smart pointer destructors
-      if (s_sig_state.err_fd != -1) {
-        close(s_sig_state.err_fd);
-        fflush(stderr);
-        close(STDERR_FILENO);
+        output_streams_map.insert(std::make_pair(sp_rsp_fd->fd, std::make_shared<output_stream_context_t>(stdout)));
+        output_streams_map.insert(std::make_pair(sp_err_fd->fd, std::make_shared<output_stream_context_t>(stderr)));
+        output_streams_map.insert(std::make_pair(STDIN_FILENO,
+                                                 std::make_shared<output_stream_context_t>(sp_wrt_strm.get())));
+
+        bool is_ctrl_z_registered = false;
+
+        auto const rslt2 = read_on_ready(is_ctrl_z_registered, rms, output_streams_map);
+        auto const ec = std::get<0>(rslt2);
+        auto const wr = std::get<1>(rslt2);
+        const std::string msg{write_result_str(wr)};
+
+        rtn = (ec == 0 || wr == WR::END_OF_FILE) ? EXIT_SUCCESS : EXIT_FAILURE;
+
+        log(LL::DEBUG, "program exiting with status: [%d] %s", rtn, msg.c_str());
       }
-      if (s_sig_state.wrt_fd != -1) {
-        close(s_sig_state.wrt_fd);
-      }
-      kill(s_sig_state.child_prcs_pid, SIGTERM); // signal the child process at other end of pipe to terminate
-      // now wait for the child process to terminate
-      int status = 0;
-      do {
-        if (waitpid(s_sig_state.child_prcs_pid, &status, 0) == -1) {
-          if (errno != ECHILD) {
-            fprintf(stderr, "%s: ERROR: failed waiting for child process (pid:%d): %s\n",
-                    progname(), s_sig_state.child_prcs_pid, strerror(errno));
+    }
+  } else {
+    static struct { // state needed for access in signal handler below
+      pid_t child_prcs_pid{0};
+      pid_t supervisor_pid{0};
+    } s_sig_state; // use of statics means is not thread re-entrant but that is okay for this function
+
+    s_sig_state.child_prcs_pid = child_prcs_pid;
+    s_sig_state.supervisor_pid = supervisor_pid;
+
+    while ((dup2(sp_rsp_fd->fd, STDIN_FILENO) == -1) && (errno == EINTR)) {}
+    sp_rsp_fd.reset(nullptr); // now close this file descriptor as has been duplicated to the stdin file descriptor
+
+    // register a Ctrl-C SIGINT handler that will exit the program
+    signal(SIGINT, [](int/*sig*/) {
+      signal(SIGINT, SIG_IGN);
+      if (s_sig_state.child_prcs_pid != 0 && s_sig_state.child_prcs_pid != s_sig_state.supervisor_pid) {
+        close(STDIN_FILENO);
+        fflush(stdout);
+        close(STDOUT_FILENO);
+        kill(s_sig_state.child_prcs_pid, SIGTERM); // signal the child process at other end of pipe to terminate
+        // now wait for the child process to terminate
+        int status = 0;
+        do {
+          if (waitpid(s_sig_state.child_prcs_pid, &status, 0) == -1) {
+            if (errno != ECHILD) {
+              fprintf(stderr, "%s: ERROR: failed waiting for child process (pid:%d): %s\n",
+                      progname(), s_sig_state.child_prcs_pid, strerror(errno));
+            }
+            break;
           }
+          if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
+            fprintf(stderr, "%s: ERROR: interrupted waiting for child process (pid:%d)\n",
+                    progname(), s_sig_state.child_prcs_pid);
+            break;
+          }
+        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        exit(EXIT_FAILURE); // consider a Ctrl-C interruption a failure status for process exiting
+      } else if (s_sig_state.supervisor_pid != -1) {
+        fprintf(stderr, "%s: ERROR: can't Ctrl-C interrupt echoing output of supervisor sub-command to stdout\n",
+                progname());
+      }
+    });
+
+    auto const handle_fd_error = [&uds_socket_name](const int fd, const int err_no) {
+      log(LL::ERR, "failure reading pipe fd{%d} obtained via uds socket %s:\n\t%s",
+          fd, uds_socket_name.c_str(), strerror(err_no));
+    };
+
+    using ullint = unsigned long long;
+
+    // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
+    // - reads from file descriptor input until it is closed (or error)
+    auto const echo = [&handle_fd_error](int in_fd, FILE *out_stream, ullint &n_read, ullint &n_writ) -> int {
+      char iobuf[1024];
+      for (; ;) {
+        const auto n = read(in_fd, iobuf, sizeof(iobuf));
+        if (n == -1) {
+          handle_fd_error(in_fd, errno);
+          return EXIT_FAILURE;
+        }
+        if (n <= 0) {
+          fflush(out_stream);
           break;
         }
-        if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
-          fprintf(stderr, "%s: ERROR: interrupted waiting for child process (pid:%d)\n",
-                  progname(), s_sig_state.child_prcs_pid);
-          break;
+        n_read += n;
+        const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
+        if (nw > 0) {
+          n_writ += nw;
         }
-      } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-      exit(EXIT_FAILURE); // consider a Ctrl-C interruption a failure status for process exiting
-    } else if (s_sig_state.supervisor_pid != -1) {
-      fprintf(stderr, "%s: ERROR: can't Ctrl-C interrupt echoing output of supervisor sub-command to stdout\n",
-              progname());
-    }
-  });
-
-  auto const handle_fd_error = [&uds_socket_name](const int fd, const int err_no) {
-    log(LL::ERR, "failure reading pipe fd{%d} obtained via uds socket %s:\n\t%s",
-        fd, uds_socket_name.c_str(), strerror(err_no));
-  };
-
-  using ullint = unsigned long long;
-
-  // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
-  // - reads from file descriptor input until it is closed (or error)
-  auto const echo = [&handle_fd_error](const int in_fd, FILE* const out_stream, ullint &n_read, ullint &n_writ) -> int {
-    char iobuf[1024];
-    for (; ;) {
-      const auto n = read(in_fd, iobuf, sizeof(iobuf));
-      if (n == -1) {
-        handle_fd_error(in_fd, errno);
-        return EXIT_FAILURE;
+        if (nw != (decltype(nw)) n) {
+          return EXIT_FAILURE;
+        }
       }
-      if (n <= 0) {
-        fflush(out_stream);
-        break;
-      }
-      n_read += n;
-      const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
-      if (nw > 0) {
-        n_writ += nw;
-      }
-      if (nw != (decltype(nw)) n) {
-        return EXIT_FAILURE;
-      }
-    }
-    return EXIT_SUCCESS;
-  };
+      return EXIT_SUCCESS;
+    };
 
-  std::future<int> fut{};
-  ullint n_err_read{0}, n_err_writ{0};
+    ullint n_read{0}, n_writ{0};
 
-  if (is_extended_invoke) {
-    std::packaged_task<int(int, FILE*, ullint&, ullint&)> async_echo_task{ echo };
-    fut = async_echo_task.get_future();
-    std::thread thrd{ std::move(async_echo_task), sp_err_fd->fd, stderr, std::ref(n_err_read), std::ref(n_err_writ) };
-    thrd.detach();
+    rtn = echo(STDIN_FILENO, stdout, n_read, n_writ); // will echo read pipe data to stdout
+
+    log(LL::DEBUG, "%s() -> %Lu read, stdout %Lu written", __FUNCTION__, n_read, n_writ);
+
+    rtn = rtn != EXIT_SUCCESS ? EXIT_FAILURE : EXIT_SUCCESS;
   }
 
-  ullint n_read{0}, n_writ{0};
-
-  auto rtn = echo(STDIN_FILENO, stdout, n_read, n_writ); // will echo read pipe data to stdout
-
-  log(LL::DEBUG, "%s() -> %Lu read, stdout %Lu written", __FUNCTION__, n_read, n_writ);
-
-  if (is_extended_invoke) {
-    fut.wait(); // Wait until the async stderr-handling echo() lambda completes
-    log(LL::DEBUG, "%s() -> %Lu read, stderr %Lu written", __FUNCTION__, n_err_read, n_err_writ);
-  }
-
-  return rtn != EXIT_SUCCESS ? EXIT_FAILURE : EXIT_SUCCESS;
+  return rtn;
 }
 
 inline JNIEnv* jni_attach_thread(JavaVM * const jvmp) {
