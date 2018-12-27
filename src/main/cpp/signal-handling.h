@@ -25,10 +25,10 @@ limitations under the License.
 #include <functional>
 
 namespace signal_handling {
-  void set_signals_handler();
-  using ctrl_z_handler_t = std::function<void(int)>;
-  void register_ctrl_z_handler(ctrl_z_handler_t /*handler*/);
-  void register_ctrl_z_handler(int /*sig*/, ctrl_z_handler_t /*handler*/);
+  void set_signals_handler(__sighandler_t sigint_handler);
+  using signal_handler_func_t = std::function<void(int)>;
+  void register_ctrl_z_handler(signal_handler_func_t &&/*handler*/);
+  void register_ctrl_z_handler(int /*sig*/, signal_handler_func_t &&/*handler*/);
   extern volatile sig_atomic_t quit_flag;
   inline bool interrupted() { return quit_flag != 0; }
 }

@@ -32,7 +32,16 @@ using namespace logger;
 
 #define DBG_VERIFY 1
 
-stream_ctx* read_multi_stream::lookup_mutable_read_buf_ctx(int fd) const {
+const react_io_ctx* read_multi_stream::lookup_react_io_ctx(int fd) const {
+  auto search = fd_map.find(fd);
+  if (search != fd_map.end()) {
+    auto const &sp_entry = search->second;
+    return sp_entry.get();
+  }
+  return nullptr;
+}
+
+stream_ctx* read_multi_stream::lookup_mutable_stream_ctx(int fd) const {
   auto search = fd_map.find(fd);
   if (search != fd_map.end()) {
     auto const &sp_entry = search->second;

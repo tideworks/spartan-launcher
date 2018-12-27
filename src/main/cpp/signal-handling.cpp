@@ -28,39 +28,55 @@ using namespace logger;
 namespace signal_handling {
 
   volatile sig_atomic_t quit_flag{0};
+  static const char* const signal_invoked_fmt = "<< %s(sig: %d)";
 
   static void signal_callback_handler(int sig) { // can be called asynchronously
     quit_flag = 1;
-    log(LL::DEBUG, "<< %s(sig: %d)", __FUNCTION__, sig);
+    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig);
   }
 
-  void set_signals_handler() {
-    static std::mutex guard;
-    std::unique_lock<std::mutex> lk(guard);
+  static std::mutex signals_guard;
+  static signal_handler_func_t ctrl_c_handler{signal_callback_handler};
+
+  static void signal_callback_ctrl_c_handler(int sig) {
+    assert(sig == SIGINT);
+    {
+      std::unique_lock<std::mutex> lk(signals_guard);
+      ctrl_c_handler.operator()(sig);
+    }
+    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig);
+  }
+
+  void set_signals_handler(__sighandler_t sigint_handler) {
+    std::unique_lock<std::mutex> lk(signals_guard);
     quit_flag = 0;
-    signal(SIGINT, signal_callback_handler);
+    ctrl_c_handler = [sigint_handler](int sig){ sigint_handler(sig); };
+    signal(SIGINT,  signal_callback_ctrl_c_handler);
     signal(SIGTERM, signal_callback_handler);
     signal(SIGTSTP, signal_callback_handler);
   }
 
+  static std::mutex ctrl_z_guard;
   static int ctrl_z_handler_sig = SIGINT;
-  static ctrl_z_handler_t ctrl_z_handler{[](int /*sig*/) { signal_callback_handler(SIGINT); }};
+  static signal_handler_func_t ctrl_z_handler{[](int /*sig*/) { signal_callback_handler(SIGINT); }};
 
   static void signal_callback_ctrl_z_handler(int sig) { // can be called asynchronously
     assert(sig == SIGTSTP);
-    auto const sav_cb = signal(ctrl_z_handler_sig, SIG_IGN);
-    ctrl_z_handler.operator()(ctrl_z_handler_sig);
-    signal(ctrl_z_handler_sig, sav_cb);
-    log(LL::DEBUG, "<< %s(sig: %d)", __FUNCTION__, sig);
+    {
+      std::unique_lock<std::mutex> lk(ctrl_z_guard);
+      auto const sav_cb = signal(ctrl_z_handler_sig, SIG_IGN);
+      ctrl_z_handler.operator()(ctrl_z_handler_sig);
+      signal(ctrl_z_handler_sig, sav_cb);
+    }
+    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig);
   }
 
-  void register_ctrl_z_handler(ctrl_z_handler_t cb) {
+  void register_ctrl_z_handler(signal_handler_func_t &&cb) {
     register_ctrl_z_handler(SIGINT, std::move(cb));
   }
 
-  void register_ctrl_z_handler(int sig, ctrl_z_handler_t cb) {
-    static std::mutex guard;
-    std::unique_lock<std::mutex> lk(guard);
+  void register_ctrl_z_handler(int sig, signal_handler_func_t &&cb) {
+    std::unique_lock<std::mutex> lk(ctrl_z_guard);
     ctrl_z_handler_sig = sig;
     ctrl_z_handler = std::move(cb);
     signal(SIGTSTP, signal_callback_ctrl_z_handler);

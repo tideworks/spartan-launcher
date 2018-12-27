@@ -61,11 +61,13 @@ public:
   ~read_multi_stream();
   int wait_for_io(std::vector<int> &active_fds); // borrows mutable reference to a vector of fds (returns any active)
   size_t size() const { return fd_map.size(); }
-  stream_ctx* get_mutable_read_buf_ctx(int fd) { return lookup_mutable_read_buf_ctx(fd); }
-  const stream_ctx* get_read_buf_ctx(int fd) const { return lookup_mutable_read_buf_ctx(fd); }
+  const react_io_ctx* get_react_io_ctx(int fd) const { return lookup_react_io_ctx(fd); }
+  stream_ctx* get_mutable_stream_ctx(int fd) { return lookup_mutable_stream_ctx(fd); }
+  const stream_ctx* get_stream_ctx(int fd) const { return lookup_mutable_stream_ctx(fd); }
   bool remove(int fd) { return fd_map.erase(fd) > 0; }
 private:
-  stream_ctx* lookup_mutable_read_buf_ctx(int fd) const;
+  const react_io_ctx* lookup_react_io_ctx(int fd) const;
+  stream_ctx* lookup_mutable_stream_ctx(int fd) const;
   void verify_added_elem(const react_io_ctx &elem, int stdout_fd, int stderr_fd, int stdin_fd);
   void add_entry_to_map(int stdout_fd, int stderr_fd, int stdin_fd);
 };

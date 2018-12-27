@@ -49,21 +49,26 @@ const char* write_result_str(WRITE_RESULT rslt) {
 
 using write_result_t = std::tuple<int, int, WRITE_RESULT, std::string>;
 
-static write_result_t write_to_output_stream(const int fd, stream_ctx &rbc, FILE *const output_stream, ullint &n_writ)
+static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, FILE*const output_stream, ullint &n_writ)
 {
+  static const char* const func_name = __FUNCTION__;
   WRITE_RESULT wr{WR::NO_OP};
   std::string errmsg{};
+  int line_nbr{};
 
-  auto const handle_fd_error = [&errmsg](const int fd, const int err_no) {
-    errmsg = format2str("failure reading pipe fd{%d} - %s", fd, strerror(err_no));
+  auto const handle_fd_error = [&errmsg, &line_nbr](const int fd, const int err_no) {
+    errmsg = format2str("line %d: %s(): failure reading pipe fd{%d} - %s", line_nbr, func_name, fd, strerror(err_no));
   };
 
   // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
   // - reads from file descriptor input until it is closed (or error)
-  auto const echo = [&handle_fd_error](int in_fd, FILE *out_stream, ullint &n_read, ullint &n_writ) -> WRITE_RESULT {
+  auto const echo = [&handle_fd_error, &line_nbr](int in_fd, FILE *out_stream,
+                                                  ullint &n_read, ullint &n_writ) -> WRITE_RESULT
+  {
     char iobuf[2048];
     bool sig_intr;
     while (!(sig_intr = signal_handling::interrupted())) {
+      line_nbr = __LINE__ + 1;
       const auto n = read(in_fd, iobuf, sizeof(iobuf));
       if (n == -1) {
         const auto err_no = errno;
@@ -78,12 +83,14 @@ static write_result_t write_to_output_stream(const int fd, stream_ctx &rbc, FILE
         return WR::END_OF_FILE;
       }
       n_read += n;
+      line_nbr = __LINE__ + 1;
       const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
       fflush(out_stream);
       if (nw > 0) {
         n_writ += nw;
       }
       if (nw != (decltype(nw)) n) {
+        handle_fd_error(in_fd, errno);
         return WR::FAILURE;
       }
     }
@@ -110,17 +117,17 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
   while (rms.size() > 0 && !signal_handling::interrupted() && (rc = rms.wait_for_io(fds)) == 0) {
     futures.clear();
     for(auto const fd : fds) {
-      auto const prbc = rms.get_mutable_read_buf_ctx(fd);
+      auto const prbc = rms.get_mutable_stream_ctx(fd);
       assert(prbc != nullptr); // lookup should never derefence to a null pointer
       if (prbc == nullptr) continue;
       if (prbc->is_valid_init()) {
         if (!is_ctrl_z_registered) { // a one-time-only initialization
+          is_ctrl_z_registered = true;
           const auto curr_thrd = pthread_self();
           signal_handling::register_ctrl_z_handler([curr_thrd](int sig) {
-            log(LL::DEBUG, "<< %s(sig: %d)", "signal_interrupt_thread", sig);
+            log(LL::DEBUG, "<< signal_interrupt_thread(sig: %d)", sig);
             pthread_kill(curr_thrd, sig);
           });
-          is_ctrl_z_registered = true;
         }
         auto search = output_streams_map.find(fd); // look up the file descriptor to find its output stream context
         if (search == output_streams_map.end()) {
@@ -132,17 +139,19 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
         // invoke the write to the output stream context in an asynchronous manner, using a future to get the outcome
         futures.emplace_back(
             std::async(std::launch::async,
-                       [fd, prbc, output_stream_ctx] {
+                       [fd, prbc, output_stream_ctx]
+                       {
                          auto const output_stream = output_stream_ctx->output_stream;
                          auto &bytes_written = output_stream_ctx->bytes_written;
                          return write_to_output_stream(fd, *prbc, output_stream, bytes_written);
                        }));
       } else {
+        // Should never reach here - indicates corrupted runtime state
         // A failed initialization detected for the stream_ctx (the input source), so remove
         // dereference key for the input and output stream context items per this file descriptor
         rms.remove(fd); // input context
         output_streams_map.erase(fd); // output context
-        log(LL::ERR, "initialization failure of stream_ctx object per fd{%d}", fd);
+        log(LL::FATAL, "line %d: %s(): stream_ctx object initialization failure per fd{%d}",__LINE__, __FUNCTION__, fd);
         rc = EXIT_FAILURE;
         break;
       }
@@ -155,10 +164,18 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
       if (rc2 != EXIT_SUCCESS) {
         rc = rc2;
         wr = std::get<2>(rtn);
-        // removed dereference key for output context per this file descriptor
-        rms.remove(fd);
-        output_streams_map.erase(fd);
-        log(LL::ERR, std::get<3>(rtn).c_str());
+        const react_io_ctx* const reactIoCtx = rms.get_react_io_ctx(fd);
+        if (reactIoCtx != nullptr) {
+          // removed dereference key for react streaming output context per this file descriptor (and related)
+          std::array<int,3> fd_s{reactIoCtx->get_stdout_fd(), reactIoCtx->get_stderr_fd(), reactIoCtx->get_stdin_fd()};
+          for(const auto fd_tmp : fd_s) {
+            rms.remove(fd_tmp);
+            output_streams_map.erase(fd_tmp);
+          }
+        }
+        if (wr == WR::FAILURE) {
+          log(LL::ERR, std::get<3>(rtn).c_str());
+        }
       }
     }
   }

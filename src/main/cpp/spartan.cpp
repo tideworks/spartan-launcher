@@ -46,6 +46,7 @@ limitations under the License.
 #include "open-anon-pipes.h"
 #include "read-multi-strm.h"
 #include "read-on-ready.h"
+#include "signal-handling.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
@@ -477,9 +478,9 @@ extern "C" SO_EXPORT int forkable_main_entry(int argc, char **argv, const bool i
 //
 // NOTE: despite clang-tidy inspection, uds_socket_name should be declared as
 // is because this method is called asynchronously and should therefore own the
-// storage to the string
+// storage to the string - same goes for the methodDescriptor parameter
 static void supervisor_status_response(std::string uds_socket_name, JavaVM *const jvmp,
-                                       const methodDescriptor &meth_desc)
+                                       const methodDescriptor meth_desc)
 {
   int rc;
   log(LL::DEBUG, "%s(): open unix-datagram-socket %s for conveying pipe fd for writing",
@@ -526,6 +527,16 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
 static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp,
                                        const pid_t supervisor_pid)
 {
+  static const char* const func_name = __FUNCTION__;
+  static std::atomic_flag s_sig_state_lock = ATOMIC_FLAG_INIT;
+  static struct { // state needed for access in signal handler below
+    std::atomic<pid_t> child_prcs_pid{0};
+    std::atomic<pid_t> supervisor_pid{0};
+    std::atomic_int rsp_fd{-1};
+    std::atomic_int err_fd{-1};
+    std::atomic_int wrt_fd{-1};
+  } s_sig_state; // use of statics means is not thread re-entrant but that is okay for this function
+
   int rtn = EXIT_SUCCESS;
 
   auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
@@ -533,22 +544,91 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
   fd_wrapper_sp_t sp_rsp_fd{ std::move(std::get<1>(rslt)) };
   fd_wrapper_sp_t sp_err_fd{ std::move(std::get<2>(rslt)) };
   fd_wrapper_sp_t sp_wrt_fd{ std::move(std::get<3>(rslt)) };
+
   const bool is_extended_invoke = sp_err_fd != nullptr && sp_wrt_fd != nullptr;
 
+  while (s_sig_state_lock.test_and_set(std::memory_order_acquire)) ; // acquire (spin) lock
+  s_sig_state.child_prcs_pid = child_prcs_pid;
+  s_sig_state.supervisor_pid = supervisor_pid;
+  s_sig_state.rsp_fd = sp_rsp_fd->fd;
   if (is_extended_invoke) {
+    s_sig_state.err_fd = sp_err_fd->fd;
+    s_sig_state.wrt_fd = sp_wrt_fd->fd;
+  }
+  s_sig_state_lock.clear(std::memory_order_release); // release lock
+
+  // register a Ctrl-C SIGINT handler that will exit the program if other end-point is a child process
+  signal_handling::set_signals_handler([](int/*sig*/) {
+    signal(SIGINT, SIG_IGN); // set to where will ignore any subsequent Ctrl-C SIGINT
+
+    while (s_sig_state_lock.test_and_set(std::memory_order_acquire)) ; // acquire (spin) lock
+    const auto tmp_child_prcs_pid = s_sig_state.child_prcs_pid.exchange(0);
+    const auto tmp_supervisor_pid = s_sig_state.supervisor_pid.exchange(0);
+    const auto tmp_rsp_fd = s_sig_state.rsp_fd.exchange(-1);
+    const auto tmp_err_fd = s_sig_state.err_fd.exchange(-1);
+    const auto tmp_wrt_fd = s_sig_state.wrt_fd.exchange(-1);
+    s_sig_state_lock.clear(std::memory_order_release); // release lock
+
+    if (tmp_child_prcs_pid != 0 && tmp_child_prcs_pid != tmp_supervisor_pid) {
+      // close pipe file descriptors explicitly here as will be calling exit() - which bypasses C++ RIAA smart pointers
+      auto const close_fd = [](const int tmp_fd)
+      {
+        if (tmp_fd != -1) {
+          close(tmp_fd);
+        }
+      };
+      close_fd(tmp_rsp_fd);
+      fflush(stdout);
+      close_fd(tmp_err_fd);
+      fflush(stderr);
+      close_fd(tmp_wrt_fd);
+
+      kill(tmp_child_prcs_pid, SIGTERM); // signal the child process at other end-point to terminate
+
+      signal(SIGINT, [](int/*sig*/){ _exit(EXIT_FAILURE); }); // any subsequent Ctrl-C SIGINT will abruptly terminate
+
+      // now wait for the child process to terminate
+      int status = 0;
+      do {
+        int line_nbr = __LINE__ + 1;
+        if (waitpid(tmp_child_prcs_pid, &status, 0) == -1) {
+          if (errno != ECHILD) {
+            log(LL::ERR, "line %d: %s(): failed waiting for child process (pid:%d): %s",
+                line_nbr, func_name, tmp_child_prcs_pid, strerror(errno));
+          }
+          break;
+        }
+        if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
+          log(LL::ERR, "line %d: %s(): interrupted waiting for child process (pid:%d)",
+              line_nbr, func_name, tmp_child_prcs_pid);
+          break;
+        }
+      } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+
+      exit(EXIT_FAILURE); // consider a Ctrl-C SIGINT interruption a failure status for process exiting
+    } else if (tmp_supervisor_pid != 0) {
+      logm(LL::WARN, "Ctrl-C interruption of echoing output of supervisor sub-command to stdout not allowed");
+    }
+  });
+
+  int line_nbr{};
+
+  if (is_extended_invoke) { // react-style handling of pipes to sub-command, i.e., Spartan.invokeCommandEx()
     read_multi_stream rms;
     try {
+      line_nbr = __LINE__ + 1;
       rms += std::make_tuple(sp_rsp_fd->fd, sp_err_fd->fd, STDIN_FILENO);
     } catch (const stream_ctx_exception &ex) {
       log(LL::ERR, "%d: %s(): failed init read_multi_stream with fds obtained via uds socket %s:\n\t%s: %s",
-          __LINE__, __FUNCTION__, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
+          line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
       rtn = EXIT_FAILURE;
     }
     if (rtn == EXIT_SUCCESS) {
+      line_nbr = __LINE__ + 1;
       auto const wrt_strm = fdopen(sp_wrt_fd->fd, "w");
       if (wrt_strm == nullptr) {
         log(LL::ERR, "%d: %s(): fdopen() failed to open stdin fd{%d} obtained via uds socket %s:\n\t%s",
-            __LINE__, __FUNCTION__, sp_wrt_fd->fd, uds_socket_name.c_str(), strerror(errno));
+            line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), strerror(errno));
         rtn = EXIT_FAILURE;
       } else {
         std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{wrt_strm, &::fclose};
@@ -573,61 +653,20 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
         log(LL::DEBUG, "program exiting with status: [%d] %s", rtn, msg.c_str());
       }
     }
-  } else {
-    static struct { // state needed for access in signal handler below
-      pid_t child_prcs_pid{0};
-      pid_t supervisor_pid{0};
-    } s_sig_state; // use of statics means is not thread re-entrant but that is okay for this function
-
-    s_sig_state.child_prcs_pid = child_prcs_pid;
-    s_sig_state.supervisor_pid = supervisor_pid;
-
-    while ((dup2(sp_rsp_fd->fd, STDIN_FILENO) == -1) && (errno == EINTR)) {}
-    sp_rsp_fd.reset(nullptr); // now close this file descriptor as has been duplicated to the stdin file descriptor
-
-    // register a Ctrl-C SIGINT handler that will exit the program
-    signal(SIGINT, [](int/*sig*/) {
-      signal(SIGINT, SIG_IGN);
-      if (s_sig_state.child_prcs_pid != 0 && s_sig_state.child_prcs_pid != s_sig_state.supervisor_pid) {
-        close(STDIN_FILENO);
-        fflush(stdout);
-        close(STDOUT_FILENO);
-        kill(s_sig_state.child_prcs_pid, SIGTERM); // signal the child process at other end of pipe to terminate
-        // now wait for the child process to terminate
-        int status = 0;
-        do {
-          if (waitpid(s_sig_state.child_prcs_pid, &status, 0) == -1) {
-            if (errno != ECHILD) {
-              fprintf(stderr, "%s: ERROR: failed waiting for child process (pid:%d): %s\n",
-                      progname(), s_sig_state.child_prcs_pid, strerror(errno));
-            }
-            break;
-          }
-          if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
-            fprintf(stderr, "%s: ERROR: interrupted waiting for child process (pid:%d)\n",
-                    progname(), s_sig_state.child_prcs_pid);
-            break;
-          }
-        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-        exit(EXIT_FAILURE); // consider a Ctrl-C interruption a failure status for process exiting
-      } else if (s_sig_state.supervisor_pid != -1) {
-        fprintf(stderr, "%s: ERROR: can't Ctrl-C interrupt echoing output of supervisor sub-command to stdout\n",
-                progname());
-      }
-    });
-
-    auto const handle_fd_error = [&uds_socket_name](const int fd, const int err_no) {
-      log(LL::ERR, "failure reading pipe fd{%d} obtained via uds socket %s:\n\t%s",
-          fd, uds_socket_name.c_str(), strerror(err_no));
+  } else { // old-style single-response pipe handling, i.e., Spartan.invokeCommand()
+    auto const handle_fd_error = [&uds_socket_name, &line_nbr](const int fd, const int err_no) {
+      log(LL::ERR, "line %d: %s(): failure reading pipe fd{%d} obtained via uds socket %s:\n\t%s",
+          line_nbr, func_name, fd, uds_socket_name.c_str(), strerror(err_no));
     };
 
     using ullint = unsigned long long;
 
     // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
     // - reads from file descriptor input until it is closed (or error)
-    auto const echo = [&handle_fd_error](int in_fd, FILE *out_stream, ullint &n_read, ullint &n_writ) -> int {
-      char iobuf[1024];
+    auto const echo = [&handle_fd_error,&line_nbr](int in_fd, FILE *out_stream, ullint &n_read, ullint &n_writ) -> int {
+      char iobuf[2048];
       for (; ;) {
+        line_nbr = __LINE__ + 1;
         const auto n = read(in_fd, iobuf, sizeof(iobuf));
         if (n == -1) {
           handle_fd_error(in_fd, errno);
@@ -638,11 +677,13 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
           break;
         }
         n_read += n;
+        line_nbr = __LINE__ + 1;
         const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
         if (nw > 0) {
           n_writ += nw;
         }
         if (nw != (decltype(nw)) n) {
+          handle_fd_error(in_fd, errno);
           return EXIT_FAILURE;
         }
       }
@@ -651,11 +692,9 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
 
     ullint n_read{0}, n_writ{0};
 
-    rtn = echo(STDIN_FILENO, stdout, n_read, n_writ); // will echo read pipe data to stdout
+    rtn = echo(sp_rsp_fd->fd, stdout, n_read, n_writ); // will echo read pipe data to stdout
 
     log(LL::DEBUG, "%s() -> %Lu read, stdout %Lu written", __FUNCTION__, n_read, n_writ);
-
-    rtn = rtn != EXIT_SUCCESS ? EXIT_FAILURE : EXIT_SUCCESS;
   }
 
   return rtn;
