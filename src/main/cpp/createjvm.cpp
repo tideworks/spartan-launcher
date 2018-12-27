@@ -26,9 +26,7 @@ limitations under the License.
 #include "findfiles.h"
 #include "createjvm.h"
 
-using logger::log;
-using logger::LL;
-using logger::is_trace_level;
+using namespace logger;
 
 const char PATH_SEPARATOR =
 #ifdef _WIN32

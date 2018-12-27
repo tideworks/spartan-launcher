@@ -38,9 +38,7 @@ limitations under the License.
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
 
-using logger::log;
-using logger::LL;
-using logger::is_trace_level;
+using namespace logger;
 
 using launch_program::try_resolve_program_path;
 

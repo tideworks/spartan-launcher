@@ -30,7 +30,7 @@ limitations under the License.
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
 
-using logger::LL;
+using namespace logger;
 
 extern const char * progname();
 

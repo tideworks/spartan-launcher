@@ -34,7 +34,7 @@ limitations under the License.
 #include <execinfo.h>
 #endif
 
-using logger::LL;
+using namespace logger;
 
 namespace send_mq_msg {
   /**

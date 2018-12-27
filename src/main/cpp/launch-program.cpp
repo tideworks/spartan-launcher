@@ -42,8 +42,7 @@ limitations under the License.
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
 
-using logger::log;
-using logger::LL;
+using namespace logger;
 
 DECL_EXCEPTION(find_program_path)
 DECL_EXCEPTION(create_uds_socket)

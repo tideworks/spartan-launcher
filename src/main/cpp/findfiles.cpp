@@ -28,7 +28,7 @@ limitations under the License.
 #include "format2str.h"
 #include "findfiles.h"
 
-using logger::LL;
+using namespace logger;
 
 bool findfiles(const char * const wrkdir, const findfiles_cb_t &callback) {
   DIR * const d = opendir(wrkdir);

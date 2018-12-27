@@ -26,7 +26,7 @@ limitations under the License.
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
 
-using logger::LL;
+using namespace logger;
 
 using namespace launch_program;
 
