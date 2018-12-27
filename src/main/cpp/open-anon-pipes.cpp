@@ -153,7 +153,7 @@ std::tuple<fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> open_react_anon_pi
   pipe_fds = make_anon_pipe();
 
   fd_wrapper_t err_rd_pipe{ std::get<PIPES::READ>(pipe_fds) };
-  fd_wrapper_sp_t err_rd_pipe_sp{ &rdr_rd_pipe, &fd_cleanup_no_delete };
+  fd_wrapper_sp_t err_rd_pipe_sp{ &err_rd_pipe, &fd_cleanup_no_delete };
   fd_wrapper_sp_t err_wr_pipe_sp{ new fd_wrapper_t{ std::get<PIPES::WRITE>(pipe_fds), uds_socket_name.c_str() },
                                   &fd_cleanup_with_delete };
 
@@ -162,7 +162,7 @@ std::tuple<fd_wrapper_sp_t, fd_wrapper_sp_t, fd_wrapper_sp_t> open_react_anon_pi
   fd_wrapper_sp_t wrt_rd_pipe_sp{ new fd_wrapper_t{ std::get<PIPES::READ>(pipe_fds), uds_socket_name.c_str() },
                                   &fd_cleanup_with_delete };
   fd_wrapper_t wrt_wr_pipe{ std::get<PIPES::WRITE>(pipe_fds) };
-  fd_wrapper_sp_t wrt_wr_pipe_sp{ &rdr_rd_pipe, &fd_cleanup_no_delete };
+  fd_wrapper_sp_t wrt_wr_pipe_sp{ &wrt_wr_pipe, &fd_cleanup_no_delete };
 
   sockaddr_un server_address{};
   socklen_t address_length;
