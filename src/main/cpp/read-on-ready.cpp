@@ -137,8 +137,9 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
         }
         auto output_stream_ctx = search->second;
         // invoke the write to the output stream context in an asynchronous manner, using a future to get the outcome
+        const auto launch_policy = rms.size() > 1 && fds.size() > 1 ? std::launch::async : std::launch::deferred;
         futures.emplace_back(
-            std::async(std::launch::async,
+            std::async(launch_policy,
                        [fd, prbc, output_stream_ctx]
                        {
                          auto const output_stream = output_stream_ctx->output_stream;
