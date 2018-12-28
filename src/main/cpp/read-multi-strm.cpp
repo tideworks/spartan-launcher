@@ -30,7 +30,7 @@ limitations under the License.
 
 using namespace logger;
 
-#define DBG_VERIFY 1
+#define DBG_VERIFY 0
 
 const react_io_ctx* read_multi_stream::lookup_react_io_ctx(int fd) const {
   auto search = fd_map.find(fd);
@@ -98,7 +98,7 @@ read_multi_stream& read_multi_stream::operator +=(std::tuple<int, int, int> &&re
 }
 
 read_multi_stream::~read_multi_stream() {
-  fprintf(stderr, "DEBUG: << (%p)->%s()\n", this, __FUNCTION__);
+  log(LL::DEBUG, "<< (%p)->%s()", this, __FUNCTION__);
 }
 
 int read_multi_stream::wait_for_io(std::vector<int> &active_fds) {
