@@ -47,7 +47,7 @@ const char* write_result_str(WRITE_RESULT rslt) {
   }
 }
 
-using write_result_t = std::tuple<int, int, WRITE_RESULT, std::string>;
+using write_result_t = std::tuple<int, WRITE_RESULT, std::string>;
 
 static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, FILE*const output_stream, ullint &n_writ)
 {
@@ -73,7 +73,7 @@ static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, F
       if (n == -1) {
         const auto err_no = errno;
         if (err_no == EAGAIN || err_no == EWOULDBLOCK) {
-          return WR::NO_OP;
+          return n_read > 0 ? WR::NO_OP : WR::END_OF_FILE;
         }
         handle_fd_error(in_fd, errno);
         return WR::FAILURE;
@@ -101,9 +101,7 @@ static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, F
 
   wr = echo(fd, output_stream, n_read, n_writ); // will echo read pipe data to stdout
 
-  int rc = wr == WR::FAILURE ? EXIT_FAILURE : EXIT_SUCCESS;
-
-  return std::make_tuple(fd, rc, wr, std::move(errmsg));
+  return std::make_tuple(fd, wr, std::move(errmsg));
 }
 
 read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
@@ -111,10 +109,12 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
 {
   std::vector<int> fds{};
   std::vector<std::future<write_result_t>> futures{};
-  WRITE_RESULT wr{WR::FAILURE};
+  WRITE_RESULT wr{WR::NO_OP};
   int rc{0};
 
-  while (rms.size() > 0 && !signal_handling::interrupted() && (rc = rms.wait_for_io(fds)) == 0) {
+  while (rms.size() > 0 && !signal_handling::interrupted() && ((rc = rms.wait_for_io(fds)) == 0 || rc == EINTR)) {
+    if (rc == EINTR) continue;
+    wr = WR::NO_OP;
     futures.clear();
     for(auto const fd : fds) {
       auto const prbc = rms.get_mutable_stream_ctx(fd);
@@ -159,29 +159,35 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
     // obtain results from all the async futures
     for(auto &fut : futures) {
       auto rtn = fut.get();
-      auto const fd  = std::get<0>(rtn);
-      auto const rc2 = std::get<1>(rtn);
-      if (rc2 != EXIT_SUCCESS) {
-        rc = rc2;
-        wr = std::get<2>(rtn);
-        const react_io_ctx* const reactIoCtx = rms.get_react_io_ctx(fd);
-        if (reactIoCtx != nullptr) {
-          // removed dereference key for react streaming output context per this file descriptor (and related)
-          std::array<int,3> fd_s{reactIoCtx->get_stdout_fd(), reactIoCtx->get_stderr_fd(), reactIoCtx->get_stdin_fd()};
-          for(const auto fd_tmp : fd_s) {
-            rms.remove(fd_tmp);
-            output_streams_map.erase(fd_tmp);
+      const auto fd  = std::get<0>(rtn);
+      const auto wr2 = std::get<1>(rtn);
+      switch (wr2) {
+        case WRITE_RESULT::NO_OP:
+        case WRITE_RESULT::SUCCESS:
+          break;
+        case WRITE_RESULT::FAILURE:
+        case WRITE_RESULT::INTERRUPTED:
+        case WRITE_RESULT::END_OF_FILE: {
+          if (wr == WR::NO_OP) {
+            wr = wr2;
           }
-        }
-        if (wr == WR::FAILURE) {
-          log(LL::ERR, std::get<3>(rtn).c_str());
+          const react_io_ctx* const reactIoCtx = rms.get_react_io_ctx(fd);
+          if (reactIoCtx != nullptr) {
+            // removed dereference key for react streaming output context per this file descriptor (and related)
+            std::array<int,3> fd_s{reactIoCtx->get_stdout_fd(), reactIoCtx->get_stderr_fd(), reactIoCtx->get_stdin_fd()};
+            for(const auto fd_tmp : fd_s) {
+              rms.remove(fd_tmp);
+              output_streams_map.erase(fd_tmp);
+            }
+          }
+          if (wr == WR::FAILURE) {
+            log(LL::ERR, std::get<2>(rtn).c_str());
+          }
+          break;
         }
       }
     }
   }
 
-  if (rc == EXIT_SUCCESS) {
-    wr = WR::SUCCESS;
-  }
   return std::make_tuple(rc, wr);
 }
