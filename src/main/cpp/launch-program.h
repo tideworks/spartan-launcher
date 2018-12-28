@@ -22,8 +22,10 @@ limitations under the License.
 #include "string-view.h"
 #include <functional>
 #include <string>
+#include <memory>
 #include <sys/un.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 namespace launch_program {
 
@@ -37,7 +39,7 @@ namespace launch_program {
     int fd;
     std::string const name;
     explicit fd_wrapper_t(int fd) : pid{0}, fd{fd}, name{} {}
-    explicit fd_wrapper_t(int fd, const char * const name) : pid{ getpid() }, fd{fd}, name{name} {}
+    explicit fd_wrapper_t(int fd, const char * const name) : pid{ ::getpid() }, fd{fd}, name{name} {}
   };
   using fd_wrapper_cleanup_t = void(*)(fd_wrapper_t *);
   using fd_wrapper_sp_t = std::unique_ptr<fd_wrapper_t, fd_wrapper_cleanup_t>;
