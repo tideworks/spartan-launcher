@@ -23,35 +23,37 @@ limitations under the License.
 #include <tuple>
 #include <unordered_map>
 #include <memory>
-
-using WR = enum class WRITE_RESULT : char {
-  NO_OP = 0, SUCCESS, FAILURE, INTERRUPTED, END_OF_FILE
-};
-
-const char* write_result_str(WRITE_RESULT rslt);
-
-using read_multi_result_t = std::tuple<int, WRITE_RESULT>;
-
-using output_stream_context_t = struct output_stream_context;
-using output_streams_context_map_t = std::unordered_map<int, std::shared_ptr<output_stream_context_t>>;
+#include "string-view.h"
 
 class read_multi_stream;
+using bpstd::string_view;
 
-read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
-                                  output_streams_context_map_t &output_streams_map);
+namespace read_on_ready {
 
-using ullint = unsigned long long;
+  using WR = enum class WRITE_RESULT : char { NO_OP = 0, SUCCESS, FAILURE, INTERRUPTED, END_OF_FILE, PIPE_CONN_BROKEN };
+  using write_result_t = std::tuple<int, WRITE_RESULT, std::string>;
+  using read_multi_result_t = std::tuple<int, WRITE_RESULT>;
+  using output_stream_context_t = struct output_stream_context;
+  using output_streams_context_map_t = std::unordered_map<int, std::shared_ptr<output_stream_context_t>>;
+  using ullint = unsigned long long;
 
-struct output_stream_context {
-  FILE* const output_stream{nullptr};
-  ullint bytes_written{1};
-  explicit output_stream_context(FILE* stream) noexcept : output_stream{stream} {}
-  output_stream_context() = delete;
-  output_stream_context(output_stream_context &&) = delete;
-  output_stream_context &operator=(const output_stream_context &&) = delete;
-  output_stream_context(const output_stream_context &) = delete;
-  output_stream_context &operator=(const output_stream_context &) = delete;
-  ~output_stream_context() = default;
-};
+  string_view write_result_str(WRITE_RESULT rslt);
+  write_result_t write_to_output_stream(const int input_fd, FILE *const output_stream, ullint &n_read, ullint &n_writ);
+  read_multi_result_t multi_read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
+                                          output_streams_context_map_t &output_streams_map);
+
+  struct output_stream_context {
+    FILE *const output_stream{nullptr};
+    ullint bytes_written{0};
+    explicit output_stream_context(FILE *stream) noexcept : output_stream{stream} {}
+    output_stream_context() = delete;
+    output_stream_context(output_stream_context &&) = delete;
+    output_stream_context &operator=(const output_stream_context &&) = delete;
+    output_stream_context(const output_stream_context &) = delete;
+    output_stream_context &operator=(const output_stream_context &) = delete;
+    ~output_stream_context() = default;
+  };
+
+} // read_on_ready
 
 #endif //READ_ON_READY_H

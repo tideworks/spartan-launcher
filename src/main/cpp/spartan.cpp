@@ -52,8 +52,8 @@ limitations under the License.
 #include <cassert>
 
 using namespace logger;
-
 using namespace launch_program;
+using namespace read_on_ready;
 
 static const size_t MSG_BUF_SZ = 4096;
 static const string_view STOP_CMD{ "--STOP" };
@@ -611,90 +611,98 @@ static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wr
     }
   });
 
-  int line_nbr{};
+  WRITE_RESULT wr{};
+  string_view msg{};
 
-  if (is_extended_invoke) { // react-style handling of pipes to sub-command, i.e., Spartan.invokeCommandEx()
-    read_multi_stream rms;
-    try {
+  if (is_extended_invoke) { // react-style handling of streams per sub-command, e.g., Spartan.invokeCommandEx()
+    int line_nbr{};
+
+    fd_wrapper_t tmp_fd_wrp{-1};
+    fd_wrapper_sp_t sp_dup_stdin_fd{nullptr, &fd_cleanup_no_delete};
+    {
       line_nbr = __LINE__ + 1;
-      rms += std::make_tuple(sp_rsp_fd->fd, sp_err_fd->fd, STDIN_FILENO);
-    } catch (const stream_ctx_exception &ex) {
-      log(LL::ERR, "%d: %s(): failed init read_multi_stream with fds obtained via uds socket %s:\n\t%s: %s",
-          line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
-      rtn = EXIT_FAILURE;
+      const auto dup_stdin_fd = dup(STDIN_FILENO);
+      if (dup_stdin_fd == -1) {
+        log(LL::ERR, "line %d: %s(): dup() failed to duplicate stdin fd{%d}:\n\t%s",
+            line_nbr, func_name, STDIN_FILENO, strerror(errno));
+        return EXIT_FAILURE;
+      }
+
+      tmp_fd_wrp.fd = dup_stdin_fd;
+      sp_dup_stdin_fd.reset(&tmp_fd_wrp);
+
+      int flags = fcntl(dup_stdin_fd, F_GETFL, 0);
+      line_nbr = __LINE__ + 1;
+      rtn = fcntl(dup_stdin_fd, F_SETFL, flags | O_NONBLOCK);
+      if (rtn == -1) {
+        log(LL::ERR, "line %d: %s(): fcntl() failed setting duplicated stdin fd{%d} to non-blocking:\n\t%s",
+            line_nbr, func_name, sp_dup_stdin_fd->fd, strerror(errno));
+        return EXIT_FAILURE;
+      }
     }
-    if (rtn == EXIT_SUCCESS) {
+
+    std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{nullptr, &::fclose};
+    {
       line_nbr = __LINE__ + 1;
       auto const wrt_strm = fdopen(sp_wrt_fd->fd, "w");
       if (wrt_strm == nullptr) {
-        log(LL::ERR, "%d: %s(): fdopen() failed to open stdin fd{%d} obtained via uds socket %s:\n\t%s",
+        log(LL::ERR, "line %d: %s(): fdopen() failed on other end-point stdin fd{%d} obtained via uds socket %s:\n\t%s",
             line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), strerror(errno));
-        rtn = EXIT_FAILURE;
-      } else {
-        std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{wrt_strm, &::fclose};
-        (void) sp_wrt_fd.release();
-
-        output_streams_context_map_t output_streams_map;
-
-        output_streams_map.insert(std::make_pair(sp_rsp_fd->fd, std::make_shared<output_stream_context_t>(stdout)));
-        output_streams_map.insert(std::make_pair(sp_err_fd->fd, std::make_shared<output_stream_context_t>(stderr)));
-        output_streams_map.insert(std::make_pair(STDIN_FILENO,
-                                                 std::make_shared<output_stream_context_t>(sp_wrt_strm.get())));
-
-        bool is_ctrl_z_registered = false;
-
-        auto const rslt2 = read_on_ready(is_ctrl_z_registered, rms, output_streams_map);
-        auto const ec = std::get<0>(rslt2);
-        auto const wr = std::get<1>(rslt2);
-        const std::string msg{write_result_str(wr)};
-
-        rtn = (ec == 0 || wr == WR::END_OF_FILE) ? EXIT_SUCCESS : EXIT_FAILURE;
-
-        log(LL::DEBUG, "program exiting with status: [%d] %s", rtn, msg.c_str());
+        return EXIT_FAILURE;
       }
+      sp_wrt_strm.reset(wrt_strm);
+      (void) sp_wrt_fd.release();
     }
-  } else { // old-style single-response pipe handling, i.e., Spartan.invokeCommand()
-    auto const handle_fd_error = [&uds_socket_name, &line_nbr](const int fd, const int err_no) {
-      log(LL::ERR, "line %d: %s(): failure reading pipe fd{%d} obtained via uds socket %s:\n\t%s",
-          line_nbr, func_name, fd, uds_socket_name.c_str(), strerror(err_no));
-    };
 
-    using ullint = unsigned long long;
+    read_multi_stream rms;
 
-    // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
-    // - reads from file descriptor input until it is closed (or error)
-    auto const echo = [&handle_fd_error,&line_nbr](int in_fd, FILE *out_stream, ullint &n_read, ullint &n_writ) -> int {
-      char iobuf[2048];
-      for (; ;) {
-        line_nbr = __LINE__ + 1;
-        const auto n = read(in_fd, iobuf, sizeof(iobuf));
-        if (n == -1) {
-          handle_fd_error(in_fd, errno);
-          return EXIT_FAILURE;
-        }
-        if (n <= 0) {
-          fflush(out_stream);
-          break;
-        }
-        n_read += n;
-        line_nbr = __LINE__ + 1;
-        const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
-        if (nw > 0) {
-          n_writ += nw;
-        }
-        if (nw != (decltype(nw)) n) {
-          handle_fd_error(in_fd, errno);
-          return EXIT_FAILURE;
-        }
-      }
-      return EXIT_SUCCESS;
-    };
+    // add the react-sytle streams context to the read_multi_stream object
+    try {
+      line_nbr = __LINE__ + 1;
+      rms += std::make_tuple(sp_rsp_fd->fd, sp_err_fd->fd, sp_dup_stdin_fd->fd);
+    } catch (const stream_ctx_exception &ex) {
+      log(LL::ERR, "line %d: %s(): failed init read_multi_stream with fds obtained via uds socket %s:\n\t%s: %s",
+          line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
+      return EXIT_FAILURE;
+    }
 
+    output_streams_context_map_t output_streams_map;
+
+    output_streams_map.insert(std::make_pair(sp_rsp_fd->fd, std::make_shared<output_stream_context_t>(stdout)));
+    output_streams_map.insert(std::make_pair(sp_err_fd->fd, std::make_shared<output_stream_context_t>(stderr)));
+    output_streams_map.insert(std::make_pair(sp_dup_stdin_fd->fd,
+                                             std::make_shared<output_stream_context_t>(sp_wrt_strm.get())));
+
+    bool is_ctrl_z_registered = false;
+
+    // now do the processing on the react-sytle streams context
+    auto const mr_rslt = multi_read_on_ready(is_ctrl_z_registered, rms, output_streams_map);
+    auto const ec = std::get<0>(mr_rslt);
+    wr = std::get<1>(mr_rslt);
+    msg = write_result_str(wr);
+
+    rtn = (ec == 0 || wr == WR::END_OF_FILE) ? EXIT_SUCCESS : EXIT_FAILURE;
+
+    log(LL::DEBUG, "line %d: %s(): program exiting with status: [%d] %s", __LINE__, func_name, rtn, msg.c_str());
+  } else { // old-style single-response stream handling, e.g., Spartan.invokeCommand()
     ullint n_read{0}, n_writ{0};
+    auto wr_rslt = write_to_output_stream(sp_rsp_fd->fd, stdout, n_read, n_writ);
+    wr = std::get<1>(wr_rslt);
+    msg = write_result_str(wr);
 
-    rtn = echo(sp_rsp_fd->fd, stdout, n_read, n_writ); // will echo read pipe data to stdout
+    if (wr == WR::FAILURE) {
+      const std::string errmsg{std::move(std::get<2>(wr_rslt))};
+      log(LL::ERR, errmsg.c_str());
+    }
 
-    log(LL::DEBUG, "%s() -> %Lu read, stdout %Lu written", __FUNCTION__, n_read, n_writ);
+    rtn = (wr == WR::FAILURE || wr == WR::INTERRUPTED) ?  EXIT_FAILURE : EXIT_SUCCESS;
+
+    log(LL::DEBUG, "line %d: %s(): -> %Lu read, stdout %Lu written with status: [%d] %s", __LINE__, func_name,
+        n_read, n_writ, rtn, msg.c_str());
+  }
+
+  if (wr == WR::PIPE_CONN_BROKEN) {
+    log(LL::ERR, "stream connection unexpectedly interrupted: %s", rtn, msg.c_str());
   }
 
   return rtn;

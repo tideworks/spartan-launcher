@@ -21,6 +21,7 @@ limitations under the License.
 #include <vector>
 #include <future>
 #include <unistd.h>
+#include <climits>
 #include "read-multi-strm.h"
 #include "signal-handling.h"
 #include "format2str.h"
@@ -31,8 +32,10 @@ limitations under the License.
 #include <cassert>
 
 using namespace logger;
+using read_on_ready::write_result_t;
+using read_on_ready::read_multi_result_t;
 
-const char* write_result_str(WRITE_RESULT rslt) {
+string_view read_on_ready::write_result_str(WRITE_RESULT rslt) {
   switch (rslt) {
     case (WR) WR::SUCCESS:
       return "success";
@@ -42,14 +45,15 @@ const char* write_result_str(WRITE_RESULT rslt) {
       return "thread interrupted";
     case (WR) WR::END_OF_FILE:
       return "end of input stream";
+    case (WR) WR::PIPE_CONN_BROKEN:
+      return "pipe connection broken";
     default:
       return "";
   }
 }
 
-using write_result_t = std::tuple<int, WRITE_RESULT, std::string>;
-
-static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, FILE*const output_stream, ullint &n_writ)
+write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *const output_stream,
+                                                     ullint &n_read, ullint &n_writ)
 {
   static const char* const func_name = __FUNCTION__;
   WRITE_RESULT wr{WR::NO_OP};
@@ -62,30 +66,53 @@ static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, F
 
   // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
   // - reads from file descriptor input until it is closed (or error)
-  auto const echo = [&handle_fd_error, &line_nbr](int in_fd, FILE *out_stream,
+  auto const echo = [&handle_fd_error, &line_nbr](const int in_fd, FILE *const out_stream,
                                                   ullint &n_read, ullint &n_writ) -> WRITE_RESULT
   {
-    char iobuf[2048];
+    fflush(out_stream);
+    line_nbr = __LINE__ + 1;
+    const auto out_fd = fileno(out_stream);
+    if (out_fd == -1) {
+      handle_fd_error(in_fd, errno);
+      return WR::FAILURE;
+    }
+
+    // POSIX API documentation (http://man7.org/linux/man-pages/man2/pipe.2.html):
+    //
+    // If a read(2) specifies a buffer size that is smaller than
+    // the next packet, then the requested number of bytes are
+    // read, and the excess bytes in the packet are discarded.
+    // Specifying a buffer size of PIPE_BUF will be sufficient to
+    // read the largest possible packets (see the previous point).
+
+    char iobuf[PIPE_BUF]; // read/write buffer
+    ullint read_total{0};
     bool sig_intr;
+
     while (!(sig_intr = signal_handling::interrupted())) {
       line_nbr = __LINE__ + 1;
       const auto n = read(in_fd, iobuf, sizeof(iobuf));
       if (n == -1) {
         const auto err_no = errno;
         if (err_no == EAGAIN || err_no == EWOULDBLOCK) {
-          return n_read > 0 ? WR::NO_OP : WR::END_OF_FILE;
+          // if read() attempt made with zero bytes read so far,
+          // then that indicates a broken pipe connection as the
+          // select() call may indicate file descriptors are ready
+          // to be read but read() returns EWOULDBLOCK condition
+          return read_total > 0 ? WR::NO_OP : WR::PIPE_CONN_BROKEN;
         }
         handle_fd_error(in_fd, errno);
         return WR::FAILURE;
       }
       if (n <= 0) {
-        fflush(out_stream);
+        fsync(out_fd);
         return WR::END_OF_FILE;
       }
+      read_total += n;
       n_read += n;
       line_nbr = __LINE__ + 1;
-      const auto nw = fwrite(iobuf, 1, (size_t) n, out_stream);
-      fflush(out_stream);
+      const auto nw = write(out_fd, iobuf, (size_t) n);
+      fsync(out_fd);
       if (nw > 0) {
         n_writ += nw;
       }
@@ -97,16 +124,15 @@ static write_result_t write_to_output_stream(const int fd, stream_ctx&/*rbc*/, F
     return sig_intr ? WR::INTERRUPTED : WR::SUCCESS;
   };
 
-  ullint n_read{0};
+  wr = echo(input_fd, output_stream, n_read, n_writ); // will echo read pipe data to stdout
 
-  wr = echo(fd, output_stream, n_read, n_writ); // will echo read pipe data to stdout
-
-  return std::make_tuple(fd, wr, std::move(errmsg));
+  return std::make_tuple(input_fd, wr, std::move(errmsg));
 }
 
-read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
-                                  output_streams_context_map_t &output_streams_map)
+read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
+                                                       output_streams_context_map_t &output_streams_map)
 {
+  int ec = EXIT_SUCCESS;
   std::vector<int> fds{};
   std::vector<std::future<write_result_t>> futures{};
   WRITE_RESULT wr{WR::NO_OP};
@@ -140,11 +166,11 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
         const auto launch_policy = rms.size() > 1 && fds.size() > 1 ? std::launch::async : std::launch::deferred;
         futures.emplace_back(
             std::async(launch_policy,
-                       [fd, prbc, output_stream_ctx]
+                       [fd, output_stream_ctx]
                        {
-                         auto const output_stream = output_stream_ctx->output_stream;
-                         auto &bytes_written = output_stream_ctx->bytes_written;
-                         return write_to_output_stream(fd, *prbc, output_stream, bytes_written);
+                         ullint n_read{0};
+                         return write_to_output_stream(fd/*input*/, output_stream_ctx->output_stream/*output*/,
+                                                       n_read, output_stream_ctx->bytes_written);
                        }));
       } else {
         // Should never reach here - indicates corrupted runtime state
@@ -168,13 +194,15 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
           break;
         case WRITE_RESULT::FAILURE:
         case WRITE_RESULT::INTERRUPTED:
-        case WRITE_RESULT::END_OF_FILE: {
+        case WRITE_RESULT::END_OF_FILE:
+        case WRITE_RESULT::PIPE_CONN_BROKEN: {
+          ec = EXIT_FAILURE;
           if (wr == WR::NO_OP) {
             wr = wr2;
           }
           const react_io_ctx* const reactIoCtx = rms.get_react_io_ctx(fd);
           if (reactIoCtx != nullptr) {
-            // removed dereference key for react streaming output context per this file descriptor (and related)
+            // removed de-reference key for react streaming output context per this file descriptor (and related fds)
             std::array<int,3> fd_s{reactIoCtx->get_stdout_fd(), reactIoCtx->get_stderr_fd(), reactIoCtx->get_stdin_fd()};
             for(const auto fd_tmp : fd_s) {
               rms.remove(fd_tmp);
@@ -182,7 +210,8 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
             }
           }
           if (wr == WR::FAILURE) {
-            log(LL::ERR, std::get<2>(rtn).c_str());
+            const std::string errmsg{std::move(std::get<2>(rtn))};
+            log(LL::ERR, errmsg.c_str());
           }
           break;
         }
@@ -190,5 +219,5 @@ read_multi_result_t read_on_ready(bool &is_ctrl_z_registered, read_multi_stream 
     }
   }
 
-  return std::make_tuple(rc, wr);
+  return std::make_tuple(ec, wr);
 }
