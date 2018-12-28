@@ -44,9 +44,8 @@ limitations under the License.
 #include "log.h"
 #include "StdOutCapture.h"
 #include "open-anon-pipes.h"
-#include "read-multi-strm.h"
 #include "read-on-ready.h"
-#include "signal-handling.h"
+#include "echo-streams.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
@@ -137,8 +136,6 @@ using defer_jstr_sp_t = std::unique_ptr<_jstring, T>;
 
 static int client_status_request(std::string const &uds_socket_name, fd_wrapper_sp_t &&socket_fd_sp,
                                  const send_mq_msg_cb_t &send_mq_msg_cb);
-static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp,
-                                       const pid_t supervisor_pid = -1);
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &method_descriptor,
                               std::array<fd_wrapper_sp_t, 3> &&fds_array,
                               int argc = 0, char **argv = nullptr, const sessionState *pss = nullptr);
@@ -519,193 +516,6 @@ static int client_status_request(std::string const &uds_socket_name, fd_wrapper_
   auto const rtn = send_mq_msg_cb(strbuf);
 
   return rtn == EXIT_SUCCESS ? stdout_echo_response_stream(uds_socket_name, std::move(socket_fd_sp)) : rtn;
-}
-
-// NOTE: due to use of privately declared static variables, this function is not
-// thread re-entrant - but that is okay for this function as it is called only in
-// spartarn client mode as very last step or processing response output to stdout
-static int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_sp_t &&read_fd_sp,
-                                       const pid_t supervisor_pid)
-{
-  static const char* const func_name = __FUNCTION__;
-  static std::atomic_flag s_sig_state_lock = ATOMIC_FLAG_INIT;
-  static struct { // state needed for access in signal handler below
-    std::atomic<pid_t> child_prcs_pid{0};
-    std::atomic<pid_t> supervisor_pid{0};
-    std::atomic_int rsp_fd{-1};
-    std::atomic_int err_fd{-1};
-    std::atomic_int wrt_fd{-1};
-  } s_sig_state; // use of statics means is not thread re-entrant but that is okay for this function
-
-  int rtn = EXIT_SUCCESS;
-
-  auto rslt = obtain_response_stream(uds_socket_name.c_str(), std::move(read_fd_sp));
-  const pid_t child_prcs_pid = std::get<0>(rslt);
-  fd_wrapper_sp_t sp_rsp_fd{ std::move(std::get<1>(rslt)) };
-  fd_wrapper_sp_t sp_err_fd{ std::move(std::get<2>(rslt)) };
-  fd_wrapper_sp_t sp_wrt_fd{ std::move(std::get<3>(rslt)) };
-
-  const bool is_extended_invoke = sp_err_fd != nullptr && sp_wrt_fd != nullptr;
-
-  while (s_sig_state_lock.test_and_set(std::memory_order_acquire)) ; // acquire (spin) lock
-  s_sig_state.child_prcs_pid = child_prcs_pid;
-  s_sig_state.supervisor_pid = supervisor_pid;
-  s_sig_state.rsp_fd = sp_rsp_fd->fd;
-  if (is_extended_invoke) {
-    s_sig_state.err_fd = sp_err_fd->fd;
-    s_sig_state.wrt_fd = sp_wrt_fd->fd;
-  }
-  s_sig_state_lock.clear(std::memory_order_release); // release lock
-
-  // register a Ctrl-C SIGINT handler that will exit the program if other end-point is a child process
-  signal_handling::set_signals_handler([](int/*sig*/) {
-    signal(SIGINT, SIG_IGN); // set to where will ignore any subsequent Ctrl-C SIGINT
-
-    while (s_sig_state_lock.test_and_set(std::memory_order_acquire)) ; // acquire (spin) lock
-    const auto tmp_child_prcs_pid = s_sig_state.child_prcs_pid.exchange(0);
-    const auto tmp_supervisor_pid = s_sig_state.supervisor_pid.exchange(0);
-    const auto tmp_rsp_fd = s_sig_state.rsp_fd.exchange(-1);
-    const auto tmp_err_fd = s_sig_state.err_fd.exchange(-1);
-    const auto tmp_wrt_fd = s_sig_state.wrt_fd.exchange(-1);
-    s_sig_state_lock.clear(std::memory_order_release); // release lock
-
-    if (tmp_child_prcs_pid != 0 && tmp_child_prcs_pid != tmp_supervisor_pid) {
-      // close pipe file descriptors explicitly here as will be calling exit() - which bypasses C++ RIAA smart pointers
-      auto const close_fd = [](const int tmp_fd)
-      {
-        if (tmp_fd != -1) {
-          close(tmp_fd);
-        }
-      };
-      close_fd(tmp_rsp_fd);
-      fflush(stdout);
-      close_fd(tmp_err_fd);
-      fflush(stderr);
-      close_fd(tmp_wrt_fd);
-
-      kill(tmp_child_prcs_pid, SIGTERM); // signal the child process at other end-point to terminate
-
-      signal(SIGINT, [](int/*sig*/){ _exit(EXIT_FAILURE); }); // any subsequent Ctrl-C SIGINT will abruptly terminate
-
-      // now wait for the child process to terminate
-      int status = 0;
-      do {
-        int line_nbr = __LINE__ + 1;
-        if (waitpid(tmp_child_prcs_pid, &status, 0) == -1) {
-          if (errno != ECHILD) {
-            log(LL::ERR, "line %d: %s(): failed waiting for child process (pid:%d): %s",
-                line_nbr, func_name, tmp_child_prcs_pid, strerror(errno));
-          }
-          break;
-        }
-        if (WIFSIGNALED(status) || WIFSTOPPED(status)) {
-          log(LL::ERR, "line %d: %s(): interrupted waiting for child process (pid:%d)",
-              line_nbr, func_name, tmp_child_prcs_pid);
-          break;
-        }
-      } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-
-      exit(EXIT_FAILURE); // consider a Ctrl-C SIGINT interruption a failure status for process exiting
-    } else if (tmp_supervisor_pid != 0) {
-      logm(LL::WARN, "Ctrl-C interruption of echoing output of supervisor sub-command to stdout not allowed");
-    }
-  });
-
-  WRITE_RESULT wr{};
-  string_view msg{};
-
-  if (is_extended_invoke) { // react-style handling of streams per sub-command, e.g., Spartan.invokeCommandEx()
-    int line_nbr{};
-
-    fd_wrapper_t tmp_fd_wrp{-1};
-    fd_wrapper_sp_t sp_dup_stdin_fd{nullptr, &fd_cleanup_no_delete};
-    {
-      line_nbr = __LINE__ + 1;
-      const auto dup_stdin_fd = dup(STDIN_FILENO);
-      if (dup_stdin_fd == -1) {
-        log(LL::ERR, "line %d: %s(): dup() failed to duplicate stdin fd{%d}:\n\t%s",
-            line_nbr, func_name, STDIN_FILENO, strerror(errno));
-        return EXIT_FAILURE;
-      }
-
-      tmp_fd_wrp.fd = dup_stdin_fd;
-      sp_dup_stdin_fd.reset(&tmp_fd_wrp);
-
-      int flags = fcntl(dup_stdin_fd, F_GETFL, 0);
-      line_nbr = __LINE__ + 1;
-      rtn = fcntl(dup_stdin_fd, F_SETFL, flags | O_NONBLOCK);
-      if (rtn == -1) {
-        log(LL::ERR, "line %d: %s(): fcntl() failed setting duplicated stdin fd{%d} to non-blocking:\n\t%s",
-            line_nbr, func_name, sp_dup_stdin_fd->fd, strerror(errno));
-        return EXIT_FAILURE;
-      }
-    }
-
-    std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{nullptr, &::fclose};
-    {
-      line_nbr = __LINE__ + 1;
-      auto const wrt_strm = fdopen(sp_wrt_fd->fd, "w");
-      if (wrt_strm == nullptr) {
-        log(LL::ERR, "line %d: %s(): fdopen() failed on other end-point stdin fd{%d} obtained via uds socket %s:\n\t%s",
-            line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), strerror(errno));
-        return EXIT_FAILURE;
-      }
-      sp_wrt_strm.reset(wrt_strm);
-      (void) sp_wrt_fd.release();
-    }
-
-    read_multi_stream rms;
-
-    // add the react-sytle streams context to the read_multi_stream object
-    try {
-      line_nbr = __LINE__ + 1;
-      rms += std::make_tuple(sp_rsp_fd->fd, sp_err_fd->fd, sp_dup_stdin_fd->fd);
-    } catch (const stream_ctx_exception &ex) {
-      log(LL::ERR, "line %d: %s(): failed init read_multi_stream with fds obtained via uds socket %s:\n\t%s: %s",
-          line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
-      return EXIT_FAILURE;
-    }
-
-    output_streams_context_map_t output_streams_map;
-
-    output_streams_map.insert(std::make_pair(sp_rsp_fd->fd, std::make_shared<output_stream_context_t>(stdout)));
-    output_streams_map.insert(std::make_pair(sp_err_fd->fd, std::make_shared<output_stream_context_t>(stderr)));
-    output_streams_map.insert(std::make_pair(sp_dup_stdin_fd->fd,
-                                             std::make_shared<output_stream_context_t>(sp_wrt_strm.get())));
-
-    bool is_ctrl_z_registered = false;
-
-    // now do the processing on the react-sytle streams context
-    auto const mr_rslt = multi_read_on_ready(is_ctrl_z_registered, rms, output_streams_map);
-    auto const ec = std::get<0>(mr_rslt);
-    wr = std::get<1>(mr_rslt);
-    msg = write_result_str(wr);
-
-    rtn = (ec == 0 || wr == WR::END_OF_FILE) ? EXIT_SUCCESS : EXIT_FAILURE;
-
-    log(LL::DEBUG, "line %d: %s(): program exiting with status: [%d] %s", __LINE__, func_name, rtn, msg.c_str());
-  } else { // old-style single-response stream handling, e.g., Spartan.invokeCommand()
-    ullint n_read{0}, n_writ{0};
-    auto wr_rslt = write_to_output_stream(sp_rsp_fd->fd, stdout, n_read, n_writ);
-    wr = std::get<1>(wr_rslt);
-    msg = write_result_str(wr);
-
-    if (wr == WR::FAILURE) {
-      const std::string errmsg{std::move(std::get<2>(wr_rslt))};
-      log(LL::ERR, errmsg.c_str());
-    }
-
-    rtn = (wr == WR::FAILURE || wr == WR::INTERRUPTED) ?  EXIT_FAILURE : EXIT_SUCCESS;
-
-    log(LL::DEBUG, "line %d: %s(): -> %Lu read, stdout %Lu written with status: [%d] %s", __LINE__, func_name,
-        n_read, n_writ, rtn, msg.c_str());
-  }
-
-  if (wr == WR::PIPE_CONN_BROKEN) {
-    log(LL::ERR, "stream connection unexpectedly interrupted: %s", rtn, msg.c_str());
-  }
-
-  return rtn;
 }
 
 inline JNIEnv* jni_attach_thread(JavaVM * const jvmp) {
