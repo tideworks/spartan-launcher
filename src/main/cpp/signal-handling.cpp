@@ -27,24 +27,30 @@ using namespace logger;
 
 namespace signal_handling {
 
+  static std::mutex signals_guard;
   volatile sig_atomic_t quit_flag{0};
-  static const char* const signal_invoked_fmt = "<< %s(sig: %d)";
+  static const char* const signal_invoked_fmt = "<< %s(sig: %d), quit_flag{%d}";
 
   static void signal_callback_handler(int sig) { // can be called asynchronously
-    quit_flag = 1;
-    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig);
+    int tmp_quit_flag{};
+    {
+      std::unique_lock<std::mutex> lk(signals_guard);
+      tmp_quit_flag = quit_flag = 1;
+    }
+    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig, tmp_quit_flag);
   }
 
-  static std::mutex signals_guard;
   static signal_handler_func_t ctrl_c_handler{signal_callback_handler};
 
   static void signal_callback_ctrl_c_handler(int sig) {
     assert(sig == SIGINT);
+    int tmp_quit_flag{};
     {
       std::unique_lock<std::mutex> lk(signals_guard);
       ctrl_c_handler.operator()(sig);
+      tmp_quit_flag = quit_flag;
     }
-    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig);
+    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig, tmp_quit_flag);
   }
 
   void set_signals_handler(__sighandler_t sigint_handler) {
@@ -62,13 +68,15 @@ namespace signal_handling {
 
   static void signal_callback_ctrl_z_handler(int sig) { // can be called asynchronously
     assert(sig == SIGTSTP);
+    int tmp_quit_flag{};
     {
       std::unique_lock<std::mutex> lk(ctrl_z_guard);
       auto const sav_cb = signal(ctrl_z_handler_sig, SIG_IGN);
       ctrl_z_handler.operator()(ctrl_z_handler_sig);
       signal(ctrl_z_handler_sig, sav_cb);
+      tmp_quit_flag = quit_flag;
     }
-    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig);
+    log(LL::DEBUG, signal_invoked_fmt, __FUNCTION__, sig, tmp_quit_flag);
   }
 
   void register_ctrl_z_handler(signal_handler_func_t &&cb) {
