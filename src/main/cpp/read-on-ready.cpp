@@ -22,6 +22,7 @@ limitations under the License.
 #include <future>
 #include <unistd.h>
 #include <climits>
+#include <sys/ioctl.h>
 #include "read-multi-strm.h"
 #include "signal-handling.h"
 #include "format2str.h"
@@ -56,12 +57,13 @@ write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *c
                                                      ullint &n_read, ullint &n_writ)
 {
   static const char* const func_name = __FUNCTION__;
+
   WRITE_RESULT wr{WR::NO_OP};
   std::string errmsg{};
   int line_nbr{};
 
   auto const handle_fd_error = [&errmsg, &line_nbr](const int fd, const int err_no) {
-    errmsg = format2str("line %d: %s(): failure reading pipe fd{%d} - %s", line_nbr, func_name, fd, strerror(err_no));
+    errmsg = format2str("line %d: %s(): failure reading pipe fd{%d}: %s", line_nbr, func_name, fd, strerror(err_no));
   };
 
   // lambda that reads from specified fd device and writes (echoes) to specified FILE stream output
@@ -79,12 +81,12 @@ write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *c
 
     // POSIX API documentation (http://man7.org/linux/man-pages/man2/pipe.2.html):
     //
-    // If a read(2) specifies a buffer size that is smaller than
-    // the next packet, then the requested number of bytes are
-    // read, and the excess bytes in the packet are discarded.
-    // Specifying a buffer size of PIPE_BUF will be sufficient to
-    // read the largest possible packets (see the previous point).
-
+    //   If a read(2) specifies a buffer size that is smaller than
+    //   the next packet, then the requested number of bytes are
+    //   read, and the excess bytes in the packet are discarded.
+    //   Specifying a buffer size of PIPE_BUF will be sufficient to
+    //   read the largest possible packets (see the previous point).
+    //
     char iobuf[PIPE_BUF]; // read/write buffer
     ullint read_total{0};
     bool sig_intr;
@@ -95,13 +97,14 @@ write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *c
       if (n == -1) {
         const auto err_no = errno;
         if (err_no == EAGAIN || err_no == EWOULDBLOCK) {
-          // if read() attempt made with zero bytes read so far,
+          // if read(2) attempt made with zero bytes read so far,
           // then that indicates a broken pipe connection as the
-          // select() call may indicate file descriptors are ready
-          // to be read but read() returns EWOULDBLOCK condition
+          // select(2) call may indicate file descriptor is ready
+          // to be read but read() call returns EAGAIN|EWOULDBLOCK
+          assert(read_total > 0);
           return read_total > 0 ? WR::NO_OP : WR::PIPE_CONN_BROKEN;
         }
-        handle_fd_error(in_fd, errno);
+        handle_fd_error(in_fd, err_no);
         return WR::FAILURE;
       }
       if (n <= 0) {
@@ -132,6 +135,8 @@ write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *c
 read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
                                                        output_streams_context_map_t &output_streams_map)
 {
+  static const char* const func_name = __FUNCTION__;
+
   int ec = EXIT_SUCCESS;
   std::vector<int> fds{};
   std::vector<std::future<write_result_t>> futures{};
@@ -155,10 +160,11 @@ read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registere
             pthread_kill(curr_thrd, sig);
           });
         }
+        int line_nbr = __LINE__ + 1;
         auto search = output_streams_map.find(fd); // look up the file descriptor to find its output stream context
         if (search == output_streams_map.end()) {
-          log(LL::WARN, "line %d: %s(): ready-to-read file descriptor failed to deref an output context - skipping",
-              __LINE__, __FUNCTION__);
+          log(LL::WARN, "line %d: %s(): ready-to-read file descriptor failed to de-ref an output context - skipping",
+              line_nbr, func_name);
           continue;
         }
         auto output_stream_ctx = search->second;
@@ -166,8 +172,20 @@ read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registere
         const auto launch_policy = rms.size() > 1 && fds.size() > 1 ? std::launch::async : std::launch::deferred;
         futures.emplace_back(
             std::async(launch_policy,
-                       [fd, output_stream_ctx]
+                       [fd, output_stream_ctx, &line_nbr]
                        {
+                         // Using ioctl(2) here to detect the case when select(2) has returned
+                         // that file descriptor is ready to read yet there are zero bytes
+                         // available to read - an indication of a broken pipe connection (i.e.,
+                         // that the other end of the pipe has been closed by process going away)
+                         int nbytes{0};
+                         line_nbr = __LINE__ + 1;
+                         if (ioctl(fd/*input*/, FIONREAD, &nbytes) == -1 || nbytes <= 0) {
+                           auto errmsg = format2str("line %d: %s(): failure reading stream from fd{%d}: %s",
+                                                    line_nbr, func_name, fd, strerror(errno));
+                           return std::make_tuple(fd, WR::PIPE_CONN_BROKEN, std::move(errmsg));
+                         }
+
                          ullint n_read{0};
                          return write_to_output_stream(fd/*input*/, output_stream_ctx->output_stream/*output*/,
                                                        n_read, output_stream_ctx->bytes_written);
@@ -178,7 +196,7 @@ read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registere
         // dereference key for the input and output stream context items per this file descriptor
         rms.remove(fd); // input context
         output_streams_map.erase(fd); // output context
-        log(LL::FATAL, "line %d: %s(): stream_ctx object initialization failure per fd{%d}",__LINE__, __FUNCTION__, fd);
+        log(LL::FATAL, "line %d: %s(): stream_ctx object initialization failure per fd{%d}",__LINE__, func_name, fd);
         rc = EXIT_FAILURE;
         break;
       }
