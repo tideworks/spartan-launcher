@@ -147,8 +147,17 @@ int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_s
     }
   });
 
+  // these will only be initialized and used for react-style multi-streams scenario
+  fd_wrapper_t tmp_fd_wrp{-1};
+  fd_wrapper_sp_t sp_dup_stdin_fd{nullptr, &fd_cleanup_no_delete};
+  std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{nullptr, &::fclose};
+
+  read_multi_stream rms;
+  output_streams_context_map_t output_streams_map;
+
   WRITE_RESULT wr{};
   string_view msg{};
+  int line_nbr{};
 
   if (is_extended_invoke) {
     //
@@ -156,13 +165,9 @@ int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_s
     // e.g., such as with Spartan.invokeCommandEx() API
     //
 
-    int line_nbr{};
-
     // for use with POSIX select(), file descriptors must be set with O_NONBLOCK
     // flag, so the stdin file descriptor is duplicated and then that descriptor
     // has that flag set and will be used with the select() OS API
-    fd_wrapper_t tmp_fd_wrp{-1};
-    fd_wrapper_sp_t sp_dup_stdin_fd{nullptr, &fd_cleanup_no_delete};
     {
       line_nbr = __LINE__ + 1;
       const auto dup_stdin_fd = dup(STDIN_FILENO);
@@ -186,7 +191,6 @@ int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_s
     }
 
     // make a FILE* stream for writing to the the stdin stream of the other end-point process
-    std::unique_ptr<FILE, decltype(&::fclose)> sp_wrt_strm{nullptr, &::fclose};
     {
       line_nbr = __LINE__ + 1;
       auto const wrt_strm = fdopen(sp_wrt_fd->fd, "w");
@@ -199,57 +203,50 @@ int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_s
       (void) sp_wrt_fd.release();
     }
 
-    read_multi_stream rms;
-
-    // add the react-sytle multi-streams context to the read_multi_stream object
+    // add the react-sytle multi-streams context to a read_multi_stream object
     try {
       line_nbr = __LINE__ + 1;
       rms += std::make_tuple(sp_rsp_fd->fd, sp_err_fd->fd, sp_dup_stdin_fd->fd);
     } catch (const stream_ctx_exception &ex) {
       log(LL::ERR, "line %d: %s(): failed init read_multi_stream with fds obtained via uds socket %s:\n\t%s: %s",
-          line_nbr, func_name, sp_wrt_fd->fd, uds_socket_name.c_str(), ex.name(), ex.what());
+          line_nbr, func_name, uds_socket_name.c_str(), ex.name(), ex.what());
       return EXIT_FAILURE;
     }
-
-    output_streams_context_map_t output_streams_map;
 
     output_streams_map.insert(std::make_pair(sp_rsp_fd->fd, std::make_shared<output_stream_context_t>(stdout)));
     output_streams_map.insert(std::make_pair(sp_err_fd->fd, std::make_shared<output_stream_context_t>(stderr)));
     output_streams_map.insert(std::make_pair(sp_dup_stdin_fd->fd,
                                              std::make_shared<output_stream_context_t>(sp_wrt_strm.get())));
-
-    bool is_ctrl_z_registered = false;
-
-    // now do the processing on the react-style multi-streams context
-    auto const mr_rslt = multi_read_on_ready(is_ctrl_z_registered, rms, output_streams_map);
-    auto const ec = std::get<0>(mr_rslt);
-    wr = std::get<1>(mr_rslt);
-    msg = write_result_str(wr);
-
-    rtn = (ec == 0 || wr == WR::END_OF_FILE) ? EXIT_SUCCESS : EXIT_FAILURE;
-
-    log(LL::DEBUG, "line %d: %s(): program exiting with status: [%d] %s", __LINE__, func_name, rtn, msg.c_str());
   } else {
     //
     // old-style single-response stream handling per a sub-command execution,
     // e.g., such as with Spartan.invokeCommand() API
     //
 
-    ullint n_read{0}, n_writ{0};
-    auto wr_rslt = write_to_output_stream(sp_rsp_fd->fd, stdout, n_read, n_writ);
-    wr = std::get<1>(wr_rslt);
-    msg = write_result_str(wr);
-
-    if (wr == WR::FAILURE) {
-      const std::string errmsg{std::move(std::get<2>(wr_rslt))};
-      log(LL::ERR, errmsg.c_str());
+    // add old-style single-response stream context to a read_multi_stream object
+    try {
+      line_nbr = __LINE__ + 1;
+      rms += sp_rsp_fd->fd;
+    } catch (const stream_ctx_exception &ex) {
+      log(LL::ERR, "line %d: %s(): failed init read_multi_stream with fd obtained via uds socket %s:\n\t%s: %s",
+          line_nbr, func_name, uds_socket_name.c_str(), ex.name(), ex.what());
+      return EXIT_FAILURE;
     }
 
-    rtn = (wr == WR::FAILURE || wr == WR::INTERRUPTED) ?  EXIT_FAILURE : EXIT_SUCCESS;
-
-    log(LL::DEBUG, "line %d: %s(): -> %Lu read, stdout %Lu written with status: [%d] %s", __LINE__, func_name,
-        n_read, n_writ, rtn, msg.c_str());
+    output_streams_map.insert(std::make_pair(sp_rsp_fd->fd, std::make_shared<output_stream_context_t>(stdout)));
   }
+
+  bool is_ctrl_z_registered = false;
+
+  // now do the processing on the react-style multi-streams context
+  auto const mr_rslt = multi_read_on_ready(is_ctrl_z_registered, rms, output_streams_map);
+  auto const ec = std::get<0>(mr_rslt);
+  wr = std::get<1>(mr_rslt);
+  msg = write_result_str(wr);
+
+  rtn = (ec == 0 || wr == WR::END_OF_FILE) ? EXIT_SUCCESS : EXIT_FAILURE;
+
+  log(LL::DEBUG, "line %d: %s(): program exiting with status: [%d] %s", __LINE__, func_name, rtn, msg.c_str());
 
   // let the end-user know if appears the connection to the other end-point process got disrupted
   if (wr == WR::PIPE_CONN_BROKEN) {
