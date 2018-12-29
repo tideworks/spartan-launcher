@@ -260,15 +260,14 @@ public final class test extends SpartanBase {
   @ChildWorkerCommand(cmd = "GENESIS", jvmArgs = {"-server", "-Xms96m", "-Xmx256m"})
   public static void doGenesisEtl(String[] args, PrintStream rspStream) {
     final String methodName = "doGenesisEtl";
-    System.setOut(rspStream);
     assert (args.length > 0);
 
     int exit_code = 0;
-    try {
-      print_method_call_info(System.out, methodName, args);
-      invokeGenerateDummyTestOutput(args, System.out, System.out);
+    try (final PrintStream outStrm = rspStream) {
+      print_method_call_info(outStrm, methodName, args);
+      invokeGenerateDummyTestOutput(args, outStrm, outStrm);
     } catch (Throwable e) {
-      e.printStackTrace(System.out);
+      e.printStackTrace(rspStream);
       exit_code = 1;
     }
     System.exit(exit_code);
@@ -277,9 +276,6 @@ public final class test extends SpartanBase {
   @ChildWorkerCommand(cmd = "CDC", jvmArgs = {"-server", "-Xms96m", "-Xmx256m"})
   public static void doCdcEtl(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "doCdcEtl";
-    System.setOut(outStream);
-    System.setErr(errStream);
-    System.setIn(inStream);
     assert (args.length > 0);
 
     final String cmd_lc = args[0].toLowerCase();
@@ -287,9 +283,11 @@ public final class test extends SpartanBase {
 
     int exit_code = 0;
     if (Spartan.isFirstInstance(pidFileBaseName)) {
-      try {
-        print_method_call_info(System.err, methodName, args); // write diagnostic info to stderr
-        invokeGenerateDummyTestOutput(args, System.out, System.err);
+      try (final PrintStream outStrm = outStream; final PrintStream errStrm = errStream;
+           final InputStream inStrm = inStream)
+      {
+        print_method_call_info(errStrm, methodName, args); // write diagnostic info to stderr
+        invokeGenerateDummyTestOutput(args, outStrm, errStrm);
       } catch (Throwable e) {
         e.printStackTrace(System.err);
         exit_code = 1;
