@@ -62,7 +62,7 @@ void read_multi_stream::verify_added_elem(const react_io_ctx &elem, int stdout_f
 #if DBG_VERIFY
   assert(&fd_map.at(stdout_fd)->stdout_ctx == &elem.stdout_ctx);
   assert(&fd_map.at(stderr_fd)->stderr_ctx == &elem.stderr_ctx);
-  assert(&fd_map.at(stdin_fd)->stderr_ctx == &elem.stdin_ctx);
+  assert(&fd_map.at(stdin_fd)->stdin_ctx == &elem.stdin_ctx);
   assert(elem.stdout_ctx.orig_fd == stdout_fd);
   assert(elem.stderr_ctx.orig_fd == stderr_fd);
   assert(elem.stdin_ctx.orig_fd == stdin_fd);
@@ -77,9 +77,11 @@ void read_multi_stream::add_entry_to_map(int stdout_fd, int stderr_fd, int stdin
   auto sp_shared_item = std::make_shared<react_io_ctx>(stdout_fd, stderr_fd, stdin_fd);
   fd_map.insert(std::make_pair(stdout_fd, sp_shared_item));
   fd_map.insert(std::make_pair(stderr_fd, sp_shared_item));
-  auto &elem = *sp_shared_item.get();
-  elem.stderr_ctx.is_stderr_flag = true;
   fd_map.insert(std::make_pair(stdin_fd, sp_shared_item));
+  auto const p_elem = sp_shared_item.get();
+  assert(p_elem != nullptr);
+  auto &elem = *p_elem;
+  elem.stderr_ctx.is_stderr_flag = true;
 #if DBG_VERIFY
   verify_added_elem(elem, stdout_fd, stderr_fd, stdin_fd);
 #endif
@@ -94,6 +96,21 @@ read_multi_stream& read_multi_stream::operator +=(std::tuple<int, int, int> &&re
 
   add_entry_to_map(stdout_fd, stderr_fd, stdin_fd);
 
+  return *this;
+}
+
+read_multi_stream& read_multi_stream::operator +=(int fd) {
+  auto sp_shared_item = std::make_shared<react_io_ctx>(fd);
+  fd_map.insert(std::make_pair(fd, sp_shared_item));
+#if DBG_VERIFY
+  auto const p_elem = sp_shared_item.get();
+  assert(p_elem != nullptr);
+  auto &elem = *p_elem;
+  assert(&fd_map.at(fd)->stdout_ctx == &elem.stdout_ctx);
+  assert(elem.stdout_ctx.orig_fd == fd);
+  assert(elem.stderr_ctx.orig_fd == -1);
+  assert(elem.stdin_ctx.orig_fd == -1);
+#endif
   return *this;
 }
 

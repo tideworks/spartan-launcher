@@ -36,7 +36,7 @@ private:
   friend struct react_io_ctx;
   friend class read_multi_stream;
 public:
-  stream_ctx() = delete;
+  stream_ctx() = default;
   stream_ctx(const stream_ctx &) = delete;
   stream_ctx& operator=(const stream_ctx &) = delete;
   explicit stream_ctx(const int input_fd);

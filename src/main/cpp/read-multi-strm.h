@@ -27,15 +27,16 @@ limitations under the License.
 #include "stream-ctx.h"
 
 struct react_io_ctx {
-  stream_ctx stdout_ctx;
-  stream_ctx stderr_ctx;
-  stream_ctx stdin_ctx;
+  stream_ctx stdout_ctx{};
+  stream_ctx stderr_ctx{};
+  stream_ctx stdin_ctx{};
   // deletes default constructor and copy constructor
   react_io_ctx() = delete;
   react_io_ctx(const react_io_ctx&) = delete;
   react_io_ctx& operator=(const react_io_ctx &) = delete;
   // supports one constructor taking arguments and a default move constructor
   // this constructor is used for emplace construction into vector
+  explicit react_io_ctx(int rsp_fd) : stdout_ctx{rsp_fd} {}
   explicit react_io_ctx(int stdout_fd, int stderr_fd, int stdin_fd)
       : stdout_ctx{stdout_fd}, stderr_ctx{stderr_fd}, stdin_ctx{stdin_fd} {}
   // supports move-only assignment semantics
@@ -56,6 +57,7 @@ public:
   read_multi_stream(const read_multi_stream &) = delete;
   read_multi_stream& operator=(const read_multi_stream &) = delete;
   read_multi_stream& operator +=(std::tuple<int, int, int> &&react_fds);
+  read_multi_stream& operator +=(int fd);
   read_multi_stream(read_multi_stream &&rms) noexcept { this->operator=(std::move(rms)); }
   read_multi_stream& operator=(read_multi_stream &&rms) = default;
   ~read_multi_stream();
