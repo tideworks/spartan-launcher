@@ -22,12 +22,17 @@ limitations under the License.
 #include <future>
 #include <unistd.h>
 #include <climits>
-#include <sys/ioctl.h>
 #include "read-multi-strm.h"
 #include "signal-handling.h"
 #include "format2str.h"
 #include "log.h"
 #include "read-on-ready.h"
+
+#define USE_IOCTL 0
+#if USE_IOCTL
+#include <sys/ioctl.h>
+#include <poll.h>
+#endif
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
@@ -101,8 +106,13 @@ write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *c
           // then that indicates a broken pipe connection as the
           // select(2) call may indicate file descriptor is ready
           // to be read but read() call returns EAGAIN|EWOULDBLOCK
-          assert(read_total > 0);
-          return read_total > 0 ? WR::NO_OP : WR::PIPE_CONN_BROKEN;
+          if (read_total > 0) {
+            return WR::NO_OP;
+          }
+#if !USE_IOCTL
+          handle_fd_error(in_fd, err_no);
+          return WR::PIPE_CONN_BROKEN;
+#endif
         }
         handle_fd_error(in_fd, err_no);
         return WR::FAILURE;
@@ -131,6 +141,15 @@ write_result_t read_on_ready::write_to_output_stream(const int input_fd, FILE *c
 
   return std::make_tuple(input_fd, wr, std::move(errmsg));
 }
+
+#if USE_IOCTL
+static bool is_write_pipe_broken(const int fd) {
+  if (fd == -1) return false;
+  struct pollfd pfd = {.fd = fd, .events = POLLERR};
+  if (poll(&pfd, 1, 0) < 0) return false;
+  return (pfd.revents & POLLERR) != 0;
+}
+#endif
 
 read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
                                                        output_streams_context_map_t &output_streams_map)
@@ -169,23 +188,27 @@ read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registere
         }
         auto output_stream_ctx = search->second;
         // invoke the write to the output stream context in an asynchronous manner, using a future to get the outcome
-        const auto launch_policy = rms.size() > 1 && fds.size() > 1 ? std::launch::async : std::launch::deferred;
+        const auto launch_policy = fds.size() > 1 ? std::launch::async : std::launch::deferred;
         futures.emplace_back(
             std::async(launch_policy,
-                       [fd, output_stream_ctx, &line_nbr]
+                       [fd, output_stream_ctx]
                        {
                          // Using ioctl(2) here to detect the case when select(2) has returned
                          // that file descriptor is ready to read yet there are zero bytes
                          // available to read - an indication of a broken pipe connection (i.e.,
                          // that the other end of the pipe has been closed by process going away)
+#if USE_IOCTL
                          int nbytes{0};
-                         line_nbr = __LINE__ + 1;
+                         int line_num = __LINE__ + 1;
                          if (ioctl(fd/*input*/, FIONREAD, &nbytes) == -1 || nbytes <= 0) {
-                           auto errmsg = format2str("line %d: %s(): failure reading stream from fd{%d}: %s",
-                                                    line_nbr, func_name, fd, strerror(errno));
+                           auto errmsg = nbytes > 0
+                                         ? format2str("line %d: %s(): failure on input stream per fd{%d}: errno:%d %s",
+                                                      line_num, func_name, fd, errno, strerror(errno))
+                                         : format2str("line %d: %s(): broken connection on input stream per fd{%d}",
+                                                      line_num, func_name, fd);
                            return std::make_tuple(fd, WR::PIPE_CONN_BROKEN, std::move(errmsg));
                          }
-
+#endif
                          ullint n_read{0};
                          return write_to_output_stream(fd/*input*/, output_stream_ctx->output_stream/*output*/,
                                                        n_read, output_stream_ctx->bytes_written);
@@ -205,29 +228,44 @@ read_multi_result_t read_on_ready::multi_read_on_ready(bool &is_ctrl_z_registere
     for(auto &fut : futures) {
       auto rtn = fut.get();
       const auto fd  = std::get<0>(rtn);
-      const auto wr2 = std::get<1>(rtn);
+      auto wr2 = std::get<1>(rtn);
       switch (wr2) {
-        case WRITE_RESULT::NO_OP:
-        case WRITE_RESULT::SUCCESS:
+        // can continue conditions
+        case WR::NO_OP:
+        case WR::SUCCESS:
           break;
-        case WRITE_RESULT::FAILURE:
-        case WRITE_RESULT::INTERRUPTED:
-        case WRITE_RESULT::END_OF_FILE:
-        case WRITE_RESULT::PIPE_CONN_BROKEN: {
-          ec = EXIT_FAILURE;
-          if (wr == WR::NO_OP) {
-            wr = wr2;
-          }
+        // can't continue conditions
+        case WR::FAILURE:
+        case WR::INTERRUPTED:
+        case WR::END_OF_FILE:
+        case WR::PIPE_CONN_BROKEN: {
           const react_io_ctx* const reactIoCtx = rms.get_react_io_ctx(fd);
           if (reactIoCtx != nullptr) {
-            // removed de-reference key for react streaming output context per this file descriptor (and related fds)
             std::array<int,3> fd_s{reactIoCtx->get_stdout_fd(), reactIoCtx->get_stderr_fd(), reactIoCtx->get_stdin_fd()};
+#if USE_IOCTL
+            if (wr2 == WR::PIPE_CONN_BROKEN && fd_s[2] != -1) {
+              auto search = output_streams_map.find(fd_s[2]);
+              if (search != output_streams_map.end()) {
+                auto wrt_stream_ctx = search->second;
+                const auto out_fd = fileno(wrt_stream_ctx->output_stream);
+                if (!is_write_pipe_broken(out_fd)) {
+                  wr2 = WR::END_OF_FILE;
+                }
+              }
+            }
+#endif
+            // removed de-reference key for react streaming output context per this file descriptor (and related fds)
             for(const auto fd_tmp : fd_s) {
+              if (fd_tmp == -1) continue;
               rms.remove(fd_tmp);
               output_streams_map.erase(fd_tmp);
             }
           }
-          if (wr == WR::FAILURE) {
+          if (wr == WR::NO_OP) {
+            wr = wr2;
+          }
+          if (wr2 != WR::END_OF_FILE) {
+            ec = EXIT_FAILURE;
             const std::string errmsg{std::move(std::get<2>(rtn))};
             log(LL::ERR, errmsg.c_str());
           }
