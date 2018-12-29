@@ -93,6 +93,14 @@ int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_s
   }
   s_sig_state_lock.clear(std::memory_order_release); // release lock
 
+  auto save_sig_handler = signal(SIGPIPE, SIG_IGN);
+  auto const restore_sig_handler = [](__sighandler_t *p) {
+    if (p != nullptr) {
+      signal(SIGPIPE, *p);
+    }
+  };
+  std::unique_ptr<__sighandler_t, decltype(restore_sig_handler)> sp_restore_sh(&save_sig_handler, restore_sig_handler);
+
   // register a Ctrl-C SIGINT handler that will exit the program if other end-point is a child process
   signal_handling::set_signals_handler([](int/*sig*/) {
     signal(SIGINT, SIG_IGN); // set to where will ignore any subsequent Ctrl-C SIGINT

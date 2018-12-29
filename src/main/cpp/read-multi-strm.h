@@ -48,6 +48,12 @@ struct react_io_ctx {
   int get_stdin_fd()  const { return stdin_ctx.orig_fd;  }
 };
 
+/* Data structure describing a polling request result  */
+struct pollfd_result {
+  int fd;			        /* File descriptor to poll. */
+  short int revents;  /* Types of events that actually occurred. */
+};
+
 class read_multi_stream final {
 private:
   std::unordered_map<int, std::shared_ptr<react_io_ctx>> fd_map{};
@@ -61,7 +67,7 @@ public:
   read_multi_stream(read_multi_stream &&rms) noexcept { this->operator=(std::move(rms)); }
   read_multi_stream& operator=(read_multi_stream &&rms) = default;
   ~read_multi_stream();
-  int wait_for_io(std::vector<int> &active_fds); // borrows mutable reference to a vector of fds (returns any active)
+  int poll_for_io(std::vector<pollfd_result> &active_fds); // mutable reference to a vector of fds (returns any active)
   size_t size() const { return fd_map.size(); }
   const react_io_ctx* get_react_io_ctx(int fd) const { return lookup_react_io_ctx(fd); }
   stream_ctx* get_mutable_stream_ctx(int fd) { return lookup_mutable_stream_ctx(fd); }

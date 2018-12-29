@@ -21,12 +21,20 @@ limitations under the License.
 #include <unistd.h>
 #include <cstring>
 #include <future>
+#include <poll.h>
 #include "log.h"
 #include "signal-handling.h"
 #include "read-multi-strm.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
+
+// This declaration appears in assert.h and is part of stdc library definition. However,
+// it is dependent upon conditional compilation controlled via NDEBUG macro definition.
+// Here we are using it regardless of whether is debug or non-debug build, so declaring
+// it extern explicitly.
+extern "C" void __assert (const char *__assertion, const char *__file, int __line)
+__THROW __attribute__ ((__noreturn__));
 
 using namespace logger;
 
@@ -118,52 +126,61 @@ read_multi_stream::~read_multi_stream() {
   log(LL::DEBUG, "<< (%p)->%s()", this, __FUNCTION__);
 }
 
-int read_multi_stream::wait_for_io(std::vector<int> &active_fds) {
-  int rc = 0;
-  fd_set rfd_set{0};
-  struct timeval tv{5, 0}; // Wait up to five seconds
+int read_multi_stream::poll_for_io(std::vector<pollfd_result> &active_fds) {
+  active_fds.clear();
+  const int time_out = 5 * 1000; // milliseconds
 
-  FD_ZERO(&rfd_set);
-  for(auto const &kv : fd_map) {
-    FD_SET(kv.first, &rfd_set); // select on the original file descriptor
+  // stack-allocate array of struct pollfd and zero initialize its memory space
+  const auto fds_count = fd_map.size();
+  if (fds_count == 0) return -1; // no file descriptors remaining to poll on
+  const auto pollfd_array_size = sizeof(struct pollfd) * fds_count;
+  auto const pollfd_array = (struct pollfd*) alloca(pollfd_array_size);
+  memset(pollfd_array, 0, pollfd_array_size);
+
+  // set fds to be polled as entries in pollfd_array
+  // (requesting event notice of when ready to read)
+  auto it = fd_map.begin();
+  unsigned int i = 0, j = 0;
+  for(; i < fds_count; i++) {
+    if (it == fd_map.end()) break; // when reach iteration end of fd_map
+    auto &pfd = pollfd_array[i];
+    pfd.fd = it->first;
+    pfd.events = POLLIN;
+    j++;
+    it++; // advance fd_map iterator to next element of fd_map
+  }
+  if (i != j && i != fds_count) {
+    __assert("number of struct pollfd entries assigned to not equal to fd_map entries count", __FILE__, __LINE__);
   }
 
-  int highest_fd = -1;
-  for(int i = 0; i < FD_SETSIZE; i++) {
-    if (FD_ISSET(i, &rfd_set) && i > highest_fd) {
-      highest_fd = i;
-    }
-  }
-
+  /* poll input stream file descriptor(s) to see when any has read input */
   while(!signal_handling::interrupted()) {
-    /* Watch input stream to see when it has input. */
     int line_nbr = __LINE__ + 1;
-    auto ret_val = select(highest_fd + 1, &rfd_set, nullptr, nullptr, &tv);
-    /* Don't rely on the value of tv now! */
+    auto ret_val = poll(pollfd_array, fds_count, time_out);
     if (ret_val == -1) {
       const auto ec = errno;
       if (ec == EINTR) {
-        return ec; // signal for exiting condition detected so bail out immediately
+        return ec; // signal interruption detected so bail out immediately
       }
-      log(LL::WARN, "%d: %s() -> select(): %s", line_nbr, __FUNCTION__, strerror(ec));
-      return -1;
+      log(LL::ERR, "%d: %s() -> poll(): %s", line_nbr, __FUNCTION__, strerror(ec));
+      __assert("poll() returned catastrophic error code condition", __FILE__, line_nbr);
     }
 
     if (ret_val > 0) {
-      active_fds.clear();
       bool any_ready = false;
-      for(auto const &kv : fd_map) {
-        if (FD_ISSET(kv.first, &rfd_set)) {
-          active_fds.push_back(kv.first);
+      for(i = 0; i < fds_count; i++) {
+        auto &pfd = pollfd_array[i];
+        if (pfd.revents != 0) {
+          active_fds.push_back({.fd = pfd.fd, .revents = pfd.revents});
           any_ready = true;
         }
       }
       if (any_ready) {
-        logm(LL::DEBUG, "Data is available now:");
+        logm(LL::TRACE, "Data is available now:");
         break;
       }
     }
   }
 
-  return rc;
+  return 0;
 }

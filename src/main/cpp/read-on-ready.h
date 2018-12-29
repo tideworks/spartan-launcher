@@ -25,6 +25,7 @@ limitations under the License.
 #include <memory>
 #include "string-view.h"
 
+struct pollfd_result;
 class read_multi_stream;
 using bpstd::string_view;
 
@@ -38,7 +39,9 @@ namespace read_on_ready {
   using ullint = unsigned long long;
 
   string_view write_result_str(WRITE_RESULT rslt);
-  write_result_t write_to_output_stream(const int input_fd, FILE *const output_stream, ullint &n_read, ullint &n_writ);
+
+  write_result_t write_to_output_stream(const pollfd_result &pollfd, FILE *const output_stream,
+                                        ullint &n_read, ullint &n_writ);
   read_multi_result_t multi_read_on_ready(bool &is_ctrl_z_registered, read_multi_stream &rms,
                                           output_streams_context_map_t &output_streams_map);
 
