@@ -253,7 +253,7 @@ int stdout_echo_response_stream(std::string const &uds_socket_name, fd_wrapper_s
 
   // let the end-user know if appears the connection to the other end-point process got disrupted
   if (wr == WR::PIPE_CONN_BROKEN) {
-    log(LL::ERR, "stream connection unexpectedly interrupted: %s", rtn, msg.c_str());
+    log(LL::ERR, "stream connection unexpectedly interrupted: %s", msg.c_str());
   }
 
   return rtn;
