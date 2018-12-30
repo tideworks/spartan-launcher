@@ -1707,7 +1707,7 @@ static int core_invoke_command(int /*argc*/, char **/*argv*/, const char *const 
   auto raii_argv_sp = parse_cmd_line(msg_arg, desc, argc_cmd_line, rc);
   if (rc == EXIT_SUCCESS) {
     auto const argv_cmd_line = raii_argv_sp.get();
-    if (argc_cmd_line <= 3) {
+    if (argc_cmd_line < 3) {
       log(LL::ERR, "%s() %s %d unexpected error - invalid command line - insufficient arguments:\n\t'%s'",
           func_name, desc, getpid(), msg_arg);
       rc = EXIT_FAILURE;
