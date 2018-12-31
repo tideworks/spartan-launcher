@@ -240,7 +240,7 @@ public final class test extends SpartanBase {
     }
   }
 
-  private static void invokeGenerateDummyTestOutput(String[] args, PrintStream rspStream, PrintStream errStream) {
+  public static void invokeGenerateDummyTestOutput(String[] args, PrintStream rspStream, PrintStream errStream) {
     assert args.length > 0;
     final String cmd = args[0];
     if (args.length > 1) {
