@@ -37,6 +37,7 @@ import java.util.function.BiFunction;
 import java.util.function.Predicate;
 import java.util.zip.GZIPInputStream;
 
+import static java.nio.file.Files.walkFileTree;
 import static java.nio.file.StandardOpenOption.CREATE;
 import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.util.stream.Collectors.toList;
@@ -143,7 +144,7 @@ public class App extends SpartanBase {
 
       // obtain list of .gz files to be decompressed
       final EnumSet<FileVisitOption> options = EnumSet.of(FileVisitOption.FOLLOW_LINKS);
-      Files.walkFileTree(dirPath, options/*EnumSet.noneOf(FileVisitOption.class)*/, Integer.MAX_VALUE,
+      walkFileTree(dirPath, options/*EnumSet.noneOf(FileVisitOption.class)*/, Integer.MAX_VALUE,
             new SimpleFileVisitor<Path>() {
               @Override
               public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
