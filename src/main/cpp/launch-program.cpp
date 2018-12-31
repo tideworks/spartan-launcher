@@ -628,7 +628,7 @@ static jobject JNICALL invoke_spartan_subcommand(
     if (!check_new_obj(output_strm_wrt_obj, "FileOutputStream per the control output pipe fd")) return nullptr;
 
     // Spartan.InvokeResponseEx class and ctor
-    auto const invoke_rsp_cls = find_class("spartan.Spartan$InvokeResponseEx");
+    auto const invoke_rsp_cls = find_class("spartan/Spartan$InvokeResponseEx");
     if (invoke_rsp_cls == nullptr) return nullptr;
 
     auto const invoke_rsp_ctor = get_method(invoke_rsp_cls, ctor_name,
@@ -758,6 +758,16 @@ extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killSIGINT
 
 /*
  * Class:     spartan_LaunchProgram
+ * Method:    killSIGTERM
+ * Signature: (I)V
+ */
+extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killSIGTERM
+    (JNIEnv *env, jclass /*cls*/, jint pid) {
+  killpid_helper(env, pid, SIGTERM, "SIGTERM");
+}
+
+/*
+ * Class:     spartan_LaunchProgram
  * Method:    killSIGKILL
  * Signature: (I)V
  */
@@ -774,6 +784,16 @@ extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killSIGKILL
 extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killProcessGroupSIGINT
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpg_helper(env, pid, SIGINT, "SIGINT");
+}
+
+/*
+ * Class:     spartan_LaunchProgram
+ * Method:    killProcessGroupSIGTERM
+ * Signature: (I)V
+ */
+extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killProcessGroupSIGTERM
+    (JNIEnv *env, jclass /*cls*/, jint pid) {
+  killpg_helper(env, pid, SIGTERM, "SIGTERM");
 }
 
 /*
