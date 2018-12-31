@@ -38,7 +38,9 @@ import spartan.Spartan;
 import spartan.SpartanBase;
 import spartan.annotations.ChildWorkerCommand;
 import spartan.annotations.SupervisorMain;
+import spartan.util.io.ReadLine;
 
+@SuppressWarnings({"JavaDoc", "unused"})
 public class App extends SpartanBase {
   private static final String clsName = App.class.getName();
   private static final String watchdogRetryErrMsgFmt =
@@ -211,6 +213,7 @@ public class App extends SpartanBase {
           handleWorkerTaskFuture(callFuture);
         } else {
           // if reach here then shutdown handler has been invoked so wait for executor to orderly terminate
+          //noinspection StatementWithEmptyBody
           while (!workerThread.awaitTermination(3, TimeUnit.SECONDS));
           return; // exiting program now
         }

@@ -38,7 +38,9 @@ import spartan.SpartanBase;
 import spartan.annotations.ChildWorkerCommand;
 import spartan.annotations.SupervisorCommand;
 import spartan.annotations.SupervisorMain;
+import spartan.util.io.ReadLine;
 
+@SuppressWarnings({"JavaDoc", "unused"})
 public class App extends SpartanBase {
   private static final String clsName = App.class.getName();
   private static final AtomicInteger workerThreadNbr = new AtomicInteger(1);
