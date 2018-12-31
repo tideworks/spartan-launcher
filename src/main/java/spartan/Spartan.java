@@ -111,11 +111,17 @@ public interface Spartan {
   static void killSIGINT(int pid) throws KillProcessException {
     LaunchProgram.killSIGINT(pid);
   }
+  static void killSIGTERM(int pid) throws KillProcessException {
+    LaunchProgram.killSIGTERM(pid);
+  }
   static void killSIGKILL(int pid) throws KillProcessException {
     LaunchProgram.killSIGKILL(pid);
   }
   static void killProcessGroupSIGINT(int pid) throws KillProcessException, KillProcessGroupException {
     LaunchProgram.killProcessGroupSIGINT(pid);
+  }
+  static void killProcessGroupSIGTERM(int pid) throws KillProcessException, KillProcessGroupException {
+    LaunchProgram.killProcessGroupSIGTERM(pid);
   }
   static void killProcessGroupSIGKILL(int pid) throws KillProcessException, KillProcessGroupException {
     LaunchProgram.killProcessGroupSIGKILL(pid);
