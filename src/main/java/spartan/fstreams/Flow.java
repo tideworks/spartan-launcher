@@ -18,12 +18,15 @@ limitations under the License.
 */
 package spartan.fstreams;
 
+import spartan.Spartan;
 import spartan.Spartan.InvokeResponseEx;
 
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -36,16 +39,29 @@ import java.util.function.BiConsumer;
 @SuppressWarnings("unused")
 public final class Flow {
   private static final String clsName = Flow.class.getSimpleName();
-  private static final AtomicInteger workerThreadNbr = new AtomicInteger(1);
-  private static final ExecutorService workerThread = Executors.newCachedThreadPool(r -> {
-    final Thread t = new Thread(r);
-    t.setDaemon(true);
-    t.setName(String.format("%s-pool-thread-#%d", clsName, workerThreadNbr.getAndIncrement()));
-    return t;
-  });
-  private final ExecutorCompletionService<Integer> exec = new ExecutorCompletionService<>(workerThread);
-  private final List<Callable<Integer>> tasksList = new ArrayList<>();
+  private final ExecutorService executorService;
+  private final ExecutorCompletionService<Integer> exec;
+  private final Map<Integer, Callable<Integer>> taskMap = new LinkedHashMap<>();
+  private final List<Integer> pids = new ArrayList<>();
   private final BiConsumer<InputStream, Subscription> noopAction = (os, sc) -> {};
+  private boolean subscribeDisabled = false;
+
+  private Flow(ExecutorService executorService) {
+    this.executorService = executorService;
+    this.exec = new ExecutorCompletionService<>(executorService);
+  }
+  private static ExecutorService makeDefaultCachedTheadPool() {
+    final AtomicInteger workerThreadNbr = new AtomicInteger(1);
+    return Executors.newCachedThreadPool(r -> {
+      final Thread t = new Thread(r);
+      t.setDaemon(true);
+      t.setName(String.format("%s-pool-thread-#%d", clsName, workerThreadNbr.getAndIncrement()));
+      return t;
+    });
+  }
+  private Flow() {
+    this(makeDefaultCachedTheadPool());
+  }
 
   /**
    * The subscriber interface allows for establishing callbacks (lambdas or method pointers) for
@@ -75,9 +91,10 @@ public final class Flow {
   }
 
   /**
-   * This interface is returned by the {@link Subscriber#start()} method. Its poll() or take() methods
-   * can be used to obtain the {@link Future} per each invoked child process. The count() method returns
-   * how many task completion context have been queued to be harvested via poll() or take().
+   * This interface is returned by the {@link Subscriber#start()} method. It is styled after the Java SDK
+   * {@link CompletionService} interface. Its {@link #poll()} or {@link #take()} methods can be used to
+   * obtain the {@link Future} per each invoked child process. The {@link #count()} method returns how many
+   * task completion context have been queued to be harvested using either poll() or take().
    * <p>
    * The {@link Future#get()} method will return the process pid number of an invoked child process. The
    * pid can be audit correlated with the {@link spartan.Spartan.InvokeResponseEx#childPID} field from when
@@ -102,7 +119,10 @@ public final class Flow {
      * @return the Future representing the next completed task
      */
     Future<Integer> take() throws InterruptedException;
-
+    /**
+     * @return the {@link ExecutorService} thread pool executor that is in use
+     */
+    ExecutorService getExecutor();
     /**
      * @return the number of task to harvest Futures on
      */
@@ -125,6 +145,22 @@ public final class Flow {
     return new Flow().makeSubscriber(rsp);
   }
 
+  /**
+   * Identical to {@link #subscribe(InvokeResponseEx)} but also allows supplying an {@link ExecutorService}
+   * argument (the default Executor is instantiated via {@link Executors#newCachedThreadPool}).
+   *
+   * @param executorService the caller's preferred thread pool Executor (overrides use of default one)
+   * @param rsp the child process context returned by {@link spartan.Spartan#invokeCommandEx(String...)}
+   * @return the subscriber context which should be populated with child process stdout and stderr
+   *         callback handlers (either lambdas or method pointers).
+   */
+  public static Subscriber subscribe(ExecutorService executorService, InvokeResponseEx rsp) {
+    return new Flow(executorService).makeSubscriber(rsp);
+  }
+
+  @SuppressWarnings({"unchecked", "UnusedReturnValue"})
+  private static <T extends Exception, R> R uncheckedExceptionThrow(Exception t) throws T { throw (T) t; }
+
   private Subscriber makeSubscriber(final InvokeResponseEx rsp) {
     return new Subscriber() {
       private BiConsumer<InputStream, Subscription> onErrorAction = noopAction;
@@ -133,6 +169,13 @@ public final class Flow {
         @Override
         public void cancel() {
           // use Spartan API to kill child process via its pid
+          pids.forEach((Integer pid) -> {
+            try {
+              Spartan.killSIGTERM(pid);
+            } catch (Spartan.KillProcessException e) {
+              uncheckedExceptionThrow(e);
+            }
+          });
         }
         @Override
         public OutputStream getRequestStream() {
@@ -150,17 +193,20 @@ public final class Flow {
       @Override
       public Subscriber onError(BiConsumer<InputStream, Subscription> onErrorAction) {
         this.onErrorAction = onErrorAction;
-        tasksList.add(() -> { onErrorAction.accept(rsp.errStream, subscription); return rsp.childPID; });
+        taskMap.put(rsp.childPID, () -> { onErrorAction.accept(rsp.errStream, subscription); return rsp.childPID; });
         return this;
       }
       @Override
       public Subscriber onNext(BiConsumer<InputStream, Subscription> onNextAction) {
         this.onNextAction = onNextAction;
-        tasksList.add(() -> { onNextAction.accept(rsp.inStream, subscription);   return rsp.childPID; });
+        taskMap.put(rsp.childPID, () -> { onNextAction.accept(rsp.inStream, subscription);   return rsp.childPID; });
         return this;
       }
       @Override
       public Subscriber subscribe(InvokeResponseEx rsp2) {
+        if (subscribeDisabled) {
+          throw new AssertionError("cannot add new subscriptions after start() method invoked");
+        }
         validateInit();
         if (rsp == rsp2) {
           throw new AssertionError("atttempting to subscribe with the same InvokeResponseEx instance again");
@@ -168,10 +214,12 @@ public final class Flow {
         return makeSubscriber(rsp2);
       }
       public FuturesCompletion start() {
+        subscribeDisabled = true;
         validateInit();
-        final int tasksCount = tasksList.size();
-        tasksList.forEach(exec::submit);
-        tasksList.clear();
+        final int tasksCount = taskMap.size();
+        taskMap.values().forEach(exec::submit);
+        pids.addAll(taskMap.keySet());
+        taskMap.clear();
         return new FuturesCompletion() {
           @Override
           public Future<Integer> poll() {
@@ -184,6 +232,10 @@ public final class Flow {
           @Override
           public Future<Integer> take() throws InterruptedException {
             return exec.take();
+          }
+          @Override
+          public ExecutorService getExecutor() {
+            return executorService;
           }
           @Override
           public int count() {
