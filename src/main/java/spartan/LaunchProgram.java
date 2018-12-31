@@ -30,8 +30,10 @@ public class LaunchProgram {
   public static native InvokeResponseEx invokeCommandEx(String[] args)
       throws ClassNotFoundException, InvokeCommandException, InterruptedException;
   public static native void killSIGINT(int pid) throws KillProcessException;
+  public static native void killSIGTERM(int pid) throws KillProcessException;
   public static native void killSIGKILL(int pid) throws KillProcessException;
   public static native void killProcessGroupSIGINT(int pid) throws KillProcessException, KillProcessGroupException;
+  public static native void killProcessGroupSIGTERM(int pid) throws KillProcessException, KillProcessGroupException;
   public static native void killProcessGroupSIGKILL(int pid) throws KillProcessException, KillProcessGroupException;
   public static native long getSysThreadID();
   public static native void sysThreadInterrupt(long sysThrdID);
