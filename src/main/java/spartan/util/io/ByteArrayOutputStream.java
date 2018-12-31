@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
-package spartan.util;
+package spartan.util.io;
 
 public class ByteArrayOutputStream extends java.io.ByteArrayOutputStream {
   public ByteArrayOutputStream(int initAllocSize) { super(initAllocSize); }

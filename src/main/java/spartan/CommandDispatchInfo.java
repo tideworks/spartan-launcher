@@ -68,7 +68,7 @@ import javassist.bytecode.annotation.StringMemberValue;
 import spartan.annotations.ChildWorkerCommand;
 import spartan.annotations.SupervisorCommand;
 import spartan.annotations.SupervisorMain;
-import spartan.util.ByteArrayOutputStream;
+import spartan.util.io.ByteArrayOutputStream;
 
 /**
  * This class will be populated by Java code running in JVM,
@@ -223,7 +223,7 @@ public final class CommandDispatchInfo implements Serializable {
       throws MalformedURLException, URISyntaxException, IOException
   {
     final CommandDispatchInfo info = obtainAnnotationInfo();
-    final spartan.util.ByteArrayOutputStream byteStream = new spartan.util.ByteArrayOutputStream(1024 * 8);
+    final ByteArrayOutputStream byteStream = new ByteArrayOutputStream(1024 * 8);
     try (final OutputStream outStrm = byteStream) {
       try(final ObjectOutputStream out = new ObjectOutputStream(outStrm)) {
         final Properties sysProps = System.getProperties();
