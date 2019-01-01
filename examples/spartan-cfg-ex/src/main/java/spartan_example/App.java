@@ -591,42 +591,62 @@ public class App extends SpartanBase {
   @SupervisorCommand("INVOKECHILDCMD")
   public void invokeChildCmd(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "invokeChildCmd";
-    try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
+    try {
       assert args.length > 0;
       print_method_call_info(outStream, methodName, args);
       final String cmd = args[0];
 
       if (args.length < 2) {
-        errS.println("ERROR: no child command specified - insufficient command line arguments");
+        errStream.println("ERROR: no child command specified - insufficient command line arguments");
         return;
       }
       if (cmd.equalsIgnoreCase(args[1])) {
-        errS.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
+        errStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
         return;
       }
 
-      final InvokeResponseEx rsp = Spartan.invokeCommandEx(Arrays.copyOfRange(args, 1, args.length));
-      _pids.add(rsp.childPID);
+      final String childSubCmd = args[1];
 
-      // send the service's serialized configuration to the spawned child process
-      final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(serializedCfgSettings.get());
-      copy(byteArrayInputStream, rsp.childInputStream);
+      final Runnable detachedTask = () -> {
+        try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
+          final InvokeResponseEx rsp = Spartan.invokeCommandEx(Arrays.copyOfRange(args, 1, args.length));
+          _pids.add(rsp.childPID);
 
-      // now use a Spartan Flow subscription to process all input streams of the spawned child process
-      final Subscriber subscriber = spartan.fstreams.Flow.subscribe(taskExecutor, rsp);
-      final FuturesCompletion futuresCompletion = subscriber
-          .onError((errStrm, subscription) -> copyWithClose(errStrm, errS, subscription))
-          .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outS, subscription))
-          .start();
+          // send the service's serialized configuration to the spawned child process
+          final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(serializedCfgSettings.get());
+          copy(byteArrayInputStream, rsp.childInputStream);
 
-      try {
-        futuresCompletion.take().get();
-      } catch (ExecutionException e) {
-        final Throwable cause = e.getCause() != null ? e.getCause() : e;
-        uncheckedExceptionThrow(cause);
-      }
-    } catch (InterruptedException e) {
-      errStream.printf("%nWARN: %s: interruption occurred - processing may not be completed!%n", args[0]);
+          // now use a Spartan Flow subscription to process all input streams of the spawned child process
+          final Subscriber subscriber = spartan.fstreams.Flow.subscribe(taskExecutor, rsp);
+          final FuturesCompletion futuresCompletion = subscriber
+              .onError((errStrm, subscription) -> copyWithClose(errStrm, errS, subscription))
+              .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outS, subscription))
+              .start();
+
+          int count = futuresCompletion.count();
+          while(count-- > 0) {
+            try {
+              final Integer childPID = futuresCompletion.take().get();
+              _pids.remove(childPID);
+            } catch (ExecutionException e) {
+              final Throwable cause = e.getCause() != null ? e.getCause() : e;
+              errS.printf("%nERROR: %s: exception encountered in sub task:%n", childSubCmd);
+              cause.printStackTrace(errS);
+              errS.println();
+            } catch (InterruptedException e) {
+              errS.printf("%nWARN: %s: interruption occurred - processing may not be completed!%n", childSubCmd);
+            }
+          }
+        } catch (InterruptedException e) {
+          errStream.printf("%nWARN: %s: interruption occurred - processing may not be completed!%n", childSubCmd);
+        } catch (Throwable e) {
+          errStream.printf("%nERROR: %s: exception thrown:%n", childSubCmd);
+          e.printStackTrace(errStream);
+        }
+      };
+
+      taskExecutor.submit(detachedTask);
+
     } catch (Throwable e) {
       errStream.printf("%nERROR: %s: exception thrown:%n", (args.length > 0 ? args[0] : "{invalid command}"));
       e.printStackTrace(errStream);
