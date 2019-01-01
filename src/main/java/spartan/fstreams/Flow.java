@@ -24,9 +24,8 @@ import spartan.Spartan.InvokeResponseEx;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.Map.Entry;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -36,12 +35,12 @@ import java.util.function.BiConsumer;
  * invoked child processes are managed for consuming their generated output via a reactive programming
  * API.
  */
-@SuppressWarnings("unused")
+@SuppressWarnings({"unused", "WeakerAccess"})
 public final class Flow {
   private static final String clsName = Flow.class.getSimpleName();
   private final ExecutorService executorService;
   private final ExecutorCompletionService<Integer> exec;
-  private final Map<Integer, Callable<Integer>> taskMap = new LinkedHashMap<>();
+  private final List<Entry<Integer, Callable<Integer>>> taskList = new ArrayList<>();
   private final List<Integer> pids = new ArrayList<>();
   private final BiConsumer<InputStream, Subscription> noopAction = (os, sc) -> {};
   private boolean subscribeDisabled = false;
@@ -86,7 +85,7 @@ public final class Flow {
    * communicate to the child process via writing to its stdin pipe.
    */
   public interface Subscription {
-    void cancel();
+    void cancel() throws Exception;
     OutputStream getRequestStream();
   }
 
@@ -167,15 +166,22 @@ public final class Flow {
       private BiConsumer<InputStream, Subscription> onNextAction = noopAction;
       private final Subscription subscription = new Subscription() {
         @Override
-        public void cancel() {
+        public void cancel() throws Exception {
           // use Spartan API to kill child process via its pid
-          pids.forEach((Integer pid) -> {
+          Exception ex = null;
+          for (final Integer pid : pids) {
             try {
               Spartan.killSIGTERM(pid);
             } catch (Spartan.KillProcessException e) {
-              uncheckedExceptionThrow(e);
+              if (ex != null) {
+                e.addSuppressed(ex);
+              }
+              ex = e;
             }
-          });
+          }
+          if (ex != null) {
+            uncheckedExceptionThrow(ex);
+          }
         }
         @Override
         public OutputStream getRequestStream() {
@@ -193,13 +199,21 @@ public final class Flow {
       @Override
       public Subscriber onError(BiConsumer<InputStream, Subscription> onErrorAction) {
         this.onErrorAction = onErrorAction;
-        taskMap.put(rsp.childPID, () -> { onErrorAction.accept(rsp.errStream, subscription); return rsp.childPID; });
+        final Callable<Integer> callableTask = () -> {
+          onErrorAction.accept(rsp.errStream, subscription);
+          return rsp.childPID;
+        };
+        taskList.add(makeCallableEntry(rsp.childPID, callableTask));
         return this;
       }
       @Override
       public Subscriber onNext(BiConsumer<InputStream, Subscription> onNextAction) {
         this.onNextAction = onNextAction;
-        taskMap.put(rsp.childPID, () -> { onNextAction.accept(rsp.inStream, subscription);   return rsp.childPID; });
+        final Callable<Integer> callableTask = () -> {
+          onNextAction.accept(rsp.inStream, subscription);
+          return rsp.childPID;
+        };
+        taskList.add(makeCallableEntry(rsp.childPID, callableTask));
         return this;
       }
       @Override
@@ -216,10 +230,10 @@ public final class Flow {
       public FuturesCompletion start() {
         subscribeDisabled = true;
         validateInit();
-        final int tasksCount = taskMap.size();
-        taskMap.values().forEach(exec::submit);
-        pids.addAll(taskMap.keySet());
-        taskMap.clear();
+        final int tasksCount = taskList.size();
+        pids.clear();
+        taskList.stream().map(entry -> { pids.add(entry.getKey()); return entry.getValue(); }).forEach(exec::submit);
+        taskList.clear();
         return new FuturesCompletion() {
           @Override
           public Future<Integer> poll() {
@@ -242,6 +256,23 @@ public final class Flow {
             return tasksCount;
           }
         };
+      }
+    };
+  }
+
+  private static Entry<Integer, Callable<Integer>> makeCallableEntry(int childPID, Callable<Integer> callable) {
+    return new Entry<Integer, Callable<Integer>>() {
+      @Override
+      public Integer getKey() {
+        return childPID;
+      }
+      @Override
+      public Callable<Integer> getValue() {
+        return callable;
+      }
+      @Override
+      public Callable<Integer> setValue(Callable<Integer> value) { // ignore setter - Entry<> instance is immutable
+        return callable;
       }
     };
   }
