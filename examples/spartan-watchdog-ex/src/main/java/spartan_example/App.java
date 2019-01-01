@@ -23,6 +23,7 @@ import static java.lang.String.format;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.io.Reader;
+import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -60,17 +61,18 @@ public class App extends SpartanBase {
   private final ExecutorService workerExecutor;
   private final Thread shutdownHandler;
 
-  // watchdog service instance initialization (will run as a singleton object managed by Spartan runtime)
+  /* watchdog service instance initialization (will ultimately run as a singleton object managed by Spartan runtime) */
   {
-    final App app = spartanSingletonInstance.get();
+    final App app = spartanSingletonInstance.getAndSet(this);
     if (app != null) {
-      // constructing from pre-existing singleton object instance
+      // constructing from pre-existing singleton object instance (as instantiated in main() on service startup)
       atomicChildPID = app.atomicChildPID;
       workerTaskAtomicCallFuture = app.workerTaskAtomicCallFuture;
       watchdogTaskAtomicCallFuture = app.watchdogTaskAtomicCallFuture;
       watchdogExecutor = app.watchdogExecutor;
       workerExecutor = app.workerExecutor;
       shutdownHandler = app.shutdownHandler;
+      // now 'App app' object becomes rootless and will become garbage collected
     } else {
       // constructing brand-new singleton object instance
       atomicChildPID = new AtomicInteger(0);
@@ -107,8 +109,6 @@ public class App extends SpartanBase {
         }
       });
       Runtime.getRuntime().addShutdownHook(shutdownHandler);
-
-      spartanSingletonInstance.set(this);
     }
   }
 
@@ -150,9 +150,11 @@ public class App extends SpartanBase {
   public static void main(String[] args) {
     log(LL_INFO, "hello world - supervisor service has started!"::toString);
 
-    final App app = new App();
+    if (Arrays.stream(args).anyMatch("-start-watchdog"::equalsIgnoreCase)) {
 
-    app.startWatchdog(); // initiate watchdog task
+      new App().startWatchdog(); // initiate watchdog task (check-out the App instance initializer)
+
+    }
 
     enterSupervisorMode(_pids);
 
@@ -200,7 +202,7 @@ public class App extends SpartanBase {
       }
     };
 
-    App app = spartanSingletonInstance.getAndSet(this); // insures Spartan-managed App instance is THE instance
+    App app = spartanSingletonInstance.get(); // App object instance initializer sets this
     if (app == null) {
       app = this;
     }
