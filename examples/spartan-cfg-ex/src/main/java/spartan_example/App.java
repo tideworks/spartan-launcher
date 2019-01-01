@@ -28,8 +28,8 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
-import java.util.function.Function;
 
 import com.beust.jcommander.JCommander;
 import com.beust.jcommander.Parameter;
@@ -207,22 +207,6 @@ public class App extends SpartanBase {
   }
 
   /**
-   * Exceptions derived from {@link Throwable}, especially {@link Exception} derived
-   * classes, are re-thrown as unchecked.
-   *
-   * <p/><i>Rethrown exceptions are not wrapped yet the compiler does not detect them as
-   * checked exceptions at compile time so they do not need to be declared in the lexically
-   * containing method signature.</i>
-   *
-   * @param t an exception derived from java.lang.Throwable that will be re-thrown
-   * @return R generic argument allows for use in return statements (though will throw
-   *           exception and thus never actually return)
-   * @throws T the re-thrown exception
-   */
-  @SuppressWarnings("all")
-  private static <T extends Throwable, R> R uncheckedExceptionThrow(Throwable t) throws T { throw (T) t; }
-
-  /**
    * Designated Spartan service entry-point method. This will
    * be the <i>supervisor</i> Java JVM process.
    *
@@ -236,17 +220,8 @@ public class App extends SpartanBase {
    */
   @SupervisorMain
   public static void main(String[] args) {
-    s_args = new CommandLineArgs(programName); // object state that will hold application configuration settings
 
-    try {
-      setProgramDirectory();
-    } catch (Exception e) {
-      log(LL_ERR, e::toString);
-      log(LL_ERR, control_C_Msg::toString);
-      return;
-    }
-
-    boolean isServiceInstance = false;
+    boolean isServiceInstance;
 
     {// Remove '-service' option from args array
       final List<String> argsCopy = new ArrayList<>(Arrays.asList(args));
@@ -255,26 +230,27 @@ public class App extends SpartanBase {
       }
     }
 
-    // JCommander object is used to parse command line options (and config file derived options)
-    // and applies them to then initialize the state of the CommandLineArgs s_args object, which
-    // thereafter is referenced for obtaining any application configuration settings.
+    s_args = new CommandLineArgs(programName); // the singleton object state will hold application configuration settings
 
-    // load configuration file (if exist) and apply settings
-    JCommander jcmdr = loadConfigFile(new File(cfgSettingsFileName), App::processCommandLineArgs);
-    if (jcmdr != null) {
-      jcmdr.parse(args); // any redundant command line options will now take precedence over config file settings
-    } else {
-      // no config file settings were specified so processing only command line options (if any)
-      jcmdr = processCommandLineArgs(args);
+    try {
+      final JCommander jcmdr = initializeCommandLineArgs(s_args, args);
+      if (s_args.help) {
+        jcmdr.usage();
+        JCommander.getConsole().println(control_C_Msg);
+        return;
+      }
+    } catch (Exception e) {
+      log(LL_ERR, e::toString);
+      log(LL_ERR, control_C_Msg::toString);
+      return;
     }
 
-    if (s_args.help) {
-      jcmdr.usage();
-      JCommander.getConsole().println(control_C_Msg);
-    } else if (isServiceInstance) {
+    if (isServiceInstance) {
+      /*### go ahead and run as a service here ###*/
+
       try {
-        // now serialize instance of CommandLineArgs s_args object to
-        // a memory buffer so can be loaded by child worker processes
+        // now serialize singleton instance of CommandLineArgs s_args object to a memory
+        // buffer so can be loaded and copied (streamed) to spawned child worker processes
         final ByteArrayOutputStream outputSerCfg = new ByteArrayOutputStream(BUF_SIZE);
         s_args.save(outputSerCfg);
         serializedCfgSettings.set(outputSerCfg.toByteArray());
@@ -292,6 +268,28 @@ public class App extends SpartanBase {
       log(LL_INFO, "exiting normally"::toString);
     }
   }
+
+  private static JCommander initializeCommandLineArgs(final CommandLineArgs cmdLnArgs,
+                                                      final String[] args) throws Exception
+  {
+    setProgramDirectory();
+
+    // JCommander object is used to parse command line options (and config file derived options)
+    // and applies them to then initialize the state of the CommandLineArgs s_args object, which
+    // thereafter is referenced for obtaining any application configuration settings.
+
+    // load configuration file (if exist) and apply settings
+    JCommander jcmdr = loadConfigFile(new File(cfgSettingsFileName), cmdLnArgs, App::processCommandLineArgs);
+    if (jcmdr != null) {
+      jcmdr.parse(args); // any redundant command line options will now take precedence over config file settings
+    } else {
+      // no config file settings were specified so processing only command line options (if any)
+      jcmdr = processCommandLineArgs(cmdLnArgs, args);
+    }
+
+    return jcmdr;
+  }
+
 
   /**
    * This {@link SpartanBase} method is being overridden because this example
@@ -324,7 +322,7 @@ public class App extends SpartanBase {
    * @throws Exception if the directory is invalid for some reason
    */
   private static void setProgramDirectory() throws Exception {
-    assert(programDirPath == null);
+    assert programDirPath == null;
     try {
       String progDirPath = System.getenv("HOME"); // user home directory
       if (progDirPath == null || progDirPath.isEmpty()) {
@@ -337,14 +335,15 @@ public class App extends SpartanBase {
   }
 
   private static File getProgramDirectory() {
-    assert(programDirPath != null);
+    assert programDirPath != null;
     return programDirPath.toFile();
   }
 
-  private static JCommander processCommandLineArgs(String[] args) {
-    assert(s_args != null);
-    final JCommander jcmdr = new JCommander(s_args);
-    jcmdr.setProgramName(programName);
+  private static JCommander processCommandLineArgs(CommandLineArgs cmdLnArgs, String[] args) {
+    assert cmdLnArgs != null;
+    assert args != null;
+    final JCommander jcmdr = new JCommander(cmdLnArgs);
+    jcmdr.setProgramName(cmdLnArgs.programName);
     jcmdr.setCaseSensitiveOptions(false);
     jcmdr.setAcceptUnknownOptions(true);
     jcmdr.parse(args);
@@ -356,11 +355,14 @@ public class App extends SpartanBase {
    * superseded by a command line use of a same option.
    *
    * @param cfgFile                File object referencing config file to load and process
-   * @param processCommandLineArgs callback that applies config file options to the
+   * @param cmdLnArgs              object that will be set with configuration settings state
+   * @param processCmdLnArgs callback that applies config file options to the
    *                               application options state.
    * @return the merged JCommander instance
    */
-  private static JCommander loadConfigFile(File cfgFile, final Function<String[], JCommander> processCommandLineArgs) {
+  private static JCommander loadConfigFile(File cfgFile,
+                                           final CommandLineArgs cmdLnArgs,
+                                           final BiFunction<CommandLineArgs,String[], JCommander> processCmdLnArgs) {
     if (cfgFile.exists() || (cfgFile = new File(getProgramDirectory(), cfgFile.getName())).exists()) {
       try {
         try (final FileInputStream in = new FileInputStream(cfgFile)) {
@@ -379,7 +381,7 @@ public class App extends SpartanBase {
                 cfgAsArgs.add(format("-%s", key));
               }
             }
-            return processCommandLineArgs.apply(cfgAsArgs.toArray(new String[cfgAsArgs.size()]));
+            return processCmdLnArgs.apply(cmdLnArgs, cfgAsArgs.toArray(new String[0]));
           }
         }
       } catch (IOException e) {
@@ -447,6 +449,7 @@ public class App extends SpartanBase {
    *
    * @param inS stream for reading configuration state
    * @param args arguments that were passed to the invoked command method
+   * @param apply call-back that can be further customize/modify the settings
    * @return instance of de-serialized CommandLineArgs object
    * @throws Exception if file not found or loading from file fails
    */
@@ -509,11 +512,22 @@ public class App extends SpartanBase {
     try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
       print_method_call_info(outS, methodName, args);
 
-      s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
+      // initialize singleton object state that will hold application configuration settings
+      // (either streamed in from parent process or is loaded from properties file)
+      if (Arrays.stream(args).noneMatch("-ignore-cfg"::equalsIgnoreCase)) {
+        s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
               jcmdr -> jcmdr.parse(String.join("=", genesisChildWorkerOptn, Boolean.TRUE.toString())));
-      errS.println(s_args); // dump toString() output to error stream
+      } else {
+        // facilitates calling sub-command from command line shell (for testing purposes)
+        s_args = new CommandLineArgs(clsName);    // SpartanBase.programName not set so using simple class name
+        initializeCommandLineArgs(s_args, args);  // load config settings from properties file and command line args
+      }
+      errS.println(s_args); // dump toString() output to error stream; TODO: should comment out in real program
 
+
+      /*### call a method here to do the real work of the worker child process sub-command ###*/
       spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
+
 
     } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
       errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
@@ -521,7 +535,7 @@ public class App extends SpartanBase {
       status_code = 1;
     }
 
-    System.exit(status_code);
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 
   /**
@@ -560,9 +574,17 @@ public class App extends SpartanBase {
     try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
       print_method_call_info(errS, methodName, args);
 
-      s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
-            jcmdr -> jcmdr.parse(String.join("=", cdcChildWorkerOptn, Boolean.TRUE.toString())));
-      errS.println(s_args); // dump toString() output to error stream
+      // initialize singleton object state that will hold application configuration settings
+      // (either streamed in from parent process or is loaded from properties file)
+      if (Arrays.stream(args).noneMatch("-ignore-cfg"::equalsIgnoreCase)) {
+        s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
+              jcmdr -> jcmdr.parse(String.join("=", cdcChildWorkerOptn, Boolean.TRUE.toString())));
+      } else {
+        // facilitates calling sub-command from command line shell (for testing purposes)
+        s_args = new CommandLineArgs(clsName);    // SpartanBase.programName not set so using simple class name
+        initializeCommandLineArgs(s_args, args);  // load config settings from properties file and command line args
+      }
+      errS.println(s_args); // dump toString() output to error stream; TODO: should comment out in real program
 
       final String pidFileBaseName = String.join("-", s_args.programName, cmd).toLowerCase();
 
@@ -571,7 +593,10 @@ public class App extends SpartanBase {
         final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
         scheduler.scheduleAtFixedRate(() -> errS.print(resetBackoffToken), 3, 3, TimeUnit.SECONDS);
 
+
+        /*### call a method here to do the real work of the worker child process sub-command ###*/
         spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
+
 
       } else {
         final String errmsg = format("Child command %s is already running", cmd);
@@ -585,7 +610,7 @@ public class App extends SpartanBase {
       status_code = 1;
     }
 
-    System.exit(status_code);
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 
   @SupervisorCommand("INVOKECHILDCMD")
@@ -645,7 +670,7 @@ public class App extends SpartanBase {
         }
       };
 
-      taskExecutor.submit(detachedTask);
+      taskExecutor.submit(detachedTask); // invoked worker child process will be managed by a supervisor detached task
 
     } catch (Throwable e) {
       errStream.printf("%nERROR: %s: exception thrown:%n", (args.length > 0 ? args[0] : "{invalid command}"));
@@ -679,4 +704,20 @@ public class App extends SpartanBase {
     to.flush();
     return total;
   }
+
+  /**
+   * Exceptions derived from {@link Throwable}, especially {@link Exception} derived
+   * classes, are re-thrown as unchecked.
+   *
+   * <p/><i>Rethrown exceptions are not wrapped yet the compiler does not detect them as
+   * checked exceptions at compile time so they do not need to be declared in the lexically
+   * containing method signature.</i>
+   *
+   * @param t an exception derived from java.lang.Throwable that will be re-thrown
+   * @return R generic argument allows for use in return statements (though will throw
+   *           exception and thus never actually return)
+   * @throws T the re-thrown exception
+   */
+  @SuppressWarnings("all")
+  private static <T extends Throwable, R> R uncheckedExceptionThrow(Throwable t) throws T { throw (T) t; }
 }
