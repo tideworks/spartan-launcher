@@ -19,18 +19,15 @@ limitations under the License.
 package spartan_example;
 
 import static java.lang.String.format;
-import static java.nio.file.StandardOpenOption.CREATE;
-import static java.nio.file.StandardOpenOption.READ;
-import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 
 import java.io.*;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.nio.file.FileSystems;
-import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -41,10 +38,17 @@ import com.beust.jcommander.Parameters;
 import spartan.Spartan;
 import spartan.SpartanBase;
 import spartan.annotations.ChildWorkerCommand;
+import spartan.annotations.SupervisorCommand;
 import spartan.annotations.SupervisorMain;
+import spartan.fstreams.Flow.FuturesCompletion;
+import spartan.fstreams.Flow.Subscriber;
+import spartan.fstreams.Flow.Subscription;
+import spartan.util.io.ByteArrayOutputStream;
 
+@SuppressWarnings({"JavaDoc", "unused"})
 public class App extends SpartanBase {
   private static final String clsName = App.class.getName();
+  private static final String resetBackoffToken = "\nRESET_BACKOFF_INDEX\n";
   private static final String control_C_Msg = "Press Control-C to exit";
   private static final String invalidProgramPathErrMsg = "program directory not set, unable to proceed:";
   private static final String saveSerializedCfcSettingsErrMsg = "failed saving application configuration settings:";
@@ -57,8 +61,12 @@ public class App extends SpartanBase {
   private static final String cdcChildWorkerOptn = "-cdc-child-worker";
   private static final String cfgSettingsFileName = "config.properties";
   private static final String serializedCfcSettingsFileName = "config.ser";
+  private static final Set<Integer> _pids = ConcurrentHashMap.newKeySet(53);
+  private static final AtomicReference<byte[]> serializedCfgSettings = new AtomicReference<>(null);
+  private static final int BUF_SIZE = 0x4000;
   private static Path programDirPath;
   private static CommandLineArgs s_args;
+  private final ExecutorService taskExecutor;
 
   @Parameters(separators="= ")
   private static final class CommandLineArgs implements Serializable {
@@ -123,22 +131,18 @@ public class App extends SpartanBase {
     @Parameter(hidden=true)
     List<String> unknowns = new ArrayList<>();
 
-    void save(File serializedCfgSettingsFile) throws Exception {
-      try (final OutputStream outStream = Files.newOutputStream(serializedCfgSettingsFile.toPath(),
-              CREATE, TRUNCATE_EXISTING)) {
-        try (final ObjectOutputStream objOutStream = new ObjectOutputStream(outStream)) {
-          objOutStream.writeObject(this);
-        }
+    void save(OutputStream outStream) throws Exception {
+      try (final ObjectOutputStream objOutStream = new ObjectOutputStream(outStream)) {
+        objOutStream.writeObject(this);
+        objOutStream.flush();
       } catch (IOException e) {
         throw new Exception(saveSerializedCfcSettingsErrMsg, e);
       }
     }
 
-    static CommandLineArgs load(File serializedCfgSettingsFile) throws Exception {
-      try (final InputStream inStream = Files.newInputStream(serializedCfgSettingsFile.toPath(), READ)) {
-        try (final ObjectInputStream objInStream = new ObjectInputStream(inStream)) {
-          return (CommandLineArgs) objInStream.readObject();
-        }
+    static CommandLineArgs load(InputStream inStream) throws Exception {
+      try (final ObjectInputStream objInStream = new ObjectInputStream(inStream)) {
+        return (CommandLineArgs) objInStream.readObject();
       } catch (IOException|ClassNotFoundException e) {
         throw new Exception(loadSerializedCfcSettingsErrMsg, e);
       }
@@ -167,6 +171,39 @@ public class App extends SpartanBase {
                      ", unknowns=" + unknowns +
                      '}';
     }
+  }
+
+  // watchdog service instance initialization (will run as a singleton object managed by Spartan runtime)
+  {
+    final AtomicInteger threadNumber = new AtomicInteger(1);
+
+    taskExecutor = Executors.newCachedThreadPool(r -> {
+      final Thread t = new Thread(r);
+      t.setDaemon(true);
+      t.setName(format("%s-watchdog-thread-#%d", programName, threadNumber.getAndIncrement()));
+      return t;
+    });
+
+    // A service shutdown handler (will respond to SIGINT/SIGTERM signals and Spartan stop command);
+    // basically in this example program it just manages the ExecutorService thread pools for shutdown
+    final Thread shutdownHandler = new Thread(() -> {
+      taskExecutor.shutdown();
+      waitOnExecServiceTermination(taskExecutor, 5); // will await up to 5 seconds
+    });
+    Runtime.getRuntime().addShutdownHook(shutdownHandler);
+  }
+
+  @SuppressWarnings("SameParameterValue")
+  private static void waitOnExecServiceTermination(ExecutorService excSrvc, int waitTime) {
+    // waits for termination for waitTime (seconds only)
+    for (int i = waitTime; !excSrvc.isTerminated() && i > 0; i--) {
+      try {
+        excSrvc.awaitTermination(1, TimeUnit.SECONDS);
+      } catch (InterruptedException ignored) {
+      }
+      System.out.print('.');
+    }
+    excSrvc.shutdownNow();
   }
 
   /**
@@ -214,13 +251,13 @@ public class App extends SpartanBase {
     {// Remove '-service' option from args array
       final List<String> argsCopy = new ArrayList<>(Arrays.asList(args));
       if (isServiceInstance = argsCopy.removeIf("-service"::equalsIgnoreCase)) {
-        args = argsCopy.toArray(new String[argsCopy.size()]);
+        args = argsCopy.toArray(new String[0]);
       }
     }
 
     // JCommander object is used to parse command line options (and config file derived options)
     // and applies them to then initialize the state of the CommandLineArgs s_args object, which
-    // there after is referenced for obtaining any application configuration settings.
+    // thereafter is referenced for obtaining any application configuration settings.
 
     // load configuration file (if exist) and apply settings
     JCommander jcmdr = loadConfigFile(new File(cfgSettingsFileName), App::processCommandLineArgs);
@@ -235,10 +272,12 @@ public class App extends SpartanBase {
       jcmdr.usage();
       JCommander.getConsole().println(control_C_Msg);
     } else if (isServiceInstance) {
-      // now serialize instance of CommandLineArgs s_args object to a file so can be loaded by child worker processes
-      final File serializedCfgSettingsFile = new File(getProgramDirectory(), serializedCfcSettingsFileName);
       try {
-        s_args.save(serializedCfgSettingsFile);
+        // now serialize instance of CommandLineArgs s_args object to
+        // a memory buffer so can be loaded by child worker processes
+        final ByteArrayOutputStream outputSerCfg = new ByteArrayOutputStream(BUF_SIZE);
+        s_args.save(outputSerCfg);
+        serializedCfgSettings.set(outputSerCfg.toByteArray());
         log(LL_INFO, s_args::toString); // dump toString() output to app logging console; TODO should comment this out
       } catch (Exception e) {
         log(LL_ERR, e::toString);
@@ -246,12 +285,36 @@ public class App extends SpartanBase {
         return;
       }
 
-      log(LL_INFO, () -> format("%s: hello world - supervisor service has started!%n", programName));
+      log(LL_INFO, "hello world - supervisor service has started!"::toString);
 
       enterSupervisorMode();
 
-      log(LL_INFO, () -> format("%s exiting normally", programName));
+      log(LL_INFO, "exiting normally"::toString);
     }
+  }
+
+  /**
+   * This {@link SpartanBase} method is being overridden because this example
+   * <i>supervisor</i> will track pids of child workers that it invokes itself
+   * in its own {@link #_pids} collection. So when a child worker process
+   * completes, its pid needs to be removed from said <i>_pids</i> collection.
+   * (The <i>supervisor</i> will add the child worker's pid to the collection
+   *  when it is invoked - this overridden method will remove it when the child
+   *  process completes.)
+   * <p>
+   * The <i>_pids</i> collection is shown being passed to {@link #enterSupervisorMode()}
+   * as seen above in {@link #main(String[])}; when the <i>supervisor</i> service
+   * shuts down, any child process pids that remain active will be sent a SIGTERM
+   * signal to cause them to exit.
+   * <p>
+   * <b>NOTE:</b> It is essential to invoke the <i>super</i> method!
+   *
+   * @param pid the process pid of a child worker process that has terminated
+   */
+  @Override
+  public void childProcessCompletionNotify(int pid) {
+    super.childProcessCompletionNotify(pid);
+    _pids.remove(pid);
   }
 
   /**
@@ -373,39 +436,38 @@ public class App extends SpartanBase {
   }
 
   /**
-   * Will de-serialize instance of CommandLineArgs object from a file for obtaining application configuration settings.
+   * Will de-serialize instance of CommandLineArgs object from a file for obtaining
+   * application configuration settings.
+   * <p>
+   * Call this helper method upon entry to a Spartan child worker command before
+   * proceeding to execute the command's implementation. Any configuration initialization
+   * performed at service startup will now be available to the child process to use.
+   * <p>
+   * <b>NOTE:</b> Assign the return result into the static member variable <i>s_args</i>
    *
-   * <p/>Call this helper method upon entry to a Spartan child worker command before proceeding to execute the command's
-   * implementation. Any configuration initialization performed at service startup will now be available to the child
-   * process to use.
-   *
-   * <p/><b>NOTE:</b> Assign the return result into the static member variable <i>s_args</i>
-   *
+   * @param inS stream for reading configuration state
    * @param args arguments that were passed to the invoked command method
    * @return instance of de-serialized CommandLineArgs object
    * @throws Exception if file not found or loading from file fails
    */
-  private static CommandLineArgs childWorkerInitialization(String[] args, final Consumer<JCommander> apply) throws Exception {
-    setProgramDirectory();
-    final File serializedCfgSettingsFile = new File(getProgramDirectory(), serializedCfcSettingsFileName);
-    if (serializedCfgSettingsFile.exists()) {
-      final CommandLineArgs loadedCfg = CommandLineArgs.load(serializedCfgSettingsFile);
-      final JCommander jcmdr = new JCommander(loadedCfg);
-      if (args.length > 0) {
-        jcmdr.parse(args); // now apply the arguments of the invoked command method
-      }
-      jcmdr.parse(String.join("=", childWorkerOptn, Boolean.TRUE.toString()));
-      if (apply != null) {
-        apply.accept(jcmdr);
-      }
-      return loadedCfg;
-    } else {
-      throw new Exception(format(serCfgFileNotFoundErrMsgFmt, serializedCfgSettingsFile));
+  private static CommandLineArgs childWorkerInitialization(final InputStream inS, final String[] args,
+                                                           final Consumer<JCommander> apply) throws Exception
+  {
+    final CommandLineArgs loadedCfg = CommandLineArgs.load(inS);
+    final JCommander jcmdr = new JCommander(loadedCfg);
+    if (args.length > 0) {
+      jcmdr.parse(args); // now apply the arguments of the invoked command method
     }
+    jcmdr.parse(String.join("=", childWorkerOptn, Boolean.TRUE.toString()));
+    if (apply != null) {
+      apply.accept(jcmdr);
+    }
+    return loadedCfg;
   }
 
   /**
    * Diagnostic helper method that prints debug info for a called command method.
+   *
    * @param rspStream output stream to print info to
    * @param methodName name of the command method that was called
    * @param args arguments that were passed to the invoked method
@@ -418,109 +480,183 @@ public class App extends SpartanBase {
   /**
    * Example Spartan child worker entry-point method.
    * (Does a simulated processing activity.)
-   * <p/>
-   * The annotation declares it is invoked via the command
-   * GENETL.
-   * <p/>
+   * <p>
+   * The annotation declares it is invoked via the command GENETL.
+   * When invoked from a shell command line, the sub-command name
+   * is case-insensitive.
+   * <p>
    * The annotation also supplies Java JVM heap size options.
+   * <p>
+   * <b>NOTE:</b> a child worker command entry-point method must
+   * be declared static.
    *
    * @param args command line arguments passed to the child worker
-   *        (first argument is the name of the command invoked)
-   * @param rspStream the invoked operation can write results
-   *        (and/or health check status) to the invoker
+   *             (first argument is the name of the command invoked)
+   * @param outStream the invoked operation can write processing results
+   *                  (and/or health check status) to the invoker
+   * @param errStream stream for writing error information to the invoker
+   * @param inStream stream from receiving input from invoker
    */
-  @ChildWorkerCommand(cmd="GENETL", jvmArgs={"-Xms96m", "-Xmx184m"})
-  public static void doGenesisEtlProcessing(String[] args, PrintStream rspStream) {
+  @ChildWorkerCommand(cmd="GENETL", jvmArgs={"-Xms48m", "-Xmx128m"})
+  public static void doGenesisEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "doGenesisEtlProcessing";
-    try (final PrintStream rsp = rspStream) {
-      assert(args.length > 0);
-      print_method_call_info(rsp, methodName, args);
+    assert args.length > 0;
 
-      s_args = childWorkerInitialization(Arrays.copyOfRange(args, 1, args.length),
+    final String cmd = args[0];
+
+    int status_code = 0;
+
+    try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
+      print_method_call_info(outS, methodName, args);
+
+      s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
               jcmdr -> jcmdr.parse(String.join("=", genesisChildWorkerOptn, Boolean.TRUE.toString())));
-      rspStream.println(s_args); // dump toString() output to response stream
+      errS.println(s_args); // dump toString() output to error stream
 
-      doSimulatedEtlProcessing(args, rsp);
+      spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
 
-    } catch (Throwable e) {
-      e.printStackTrace(rspStream);
-      uncheckedExceptionThrow(e);
+    } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
+      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
+      e.printStackTrace(errStream);
+      status_code = 1;
     }
+
+    System.exit(status_code);
   }
 
   /**
    * Example Spartan child worker entry-point method.
    * (Does a simulated processing activity.)
-   *
-   * <p/>This example illustrates using Spartan technique to
+   * <p>
+   * This example illustrates using Spartan technique to
    * allow only one child process to execute this command
-   * at any give time (i.e., singleton execution semantics).
-   *
-   * <p/>The annotation declares it is invoked via the command
-   * CDCETL.
-   *
-   * <p/>The annotation also supplies Java JVM heap size options.
+   * at any give time (i.e., <b>singleton execution semantics</b>).
+   * <p>
+   * The annotation declares it is invoked via the command CDCETL.
+   * When invoked from a shell command line, the sub-command name
+   * is case-insensitive.
+   * <p>
+   * The annotation also supplies Java JVM heap size options.
+   * <p>
+   * <b>NOTE:</b> a child worker command entry-point method must
+   * be declared static.
    *
    * @param args command line arguments passed to the child worker
-   *        (first argument is the name of the command invoked)
-   * @param rspStream the invoked operation can write results
-   *        (and/or health check status) to the invoker
+   *             (first argument is the name of the command invoked)
+   * @param outStream the invoked operation can write processing results
+   *                  (and/or health check status) to the invoker
+   * @param errStream stream for writing error information to the invoker
+   * @param inStream stream from receiving input from invoker
    */
-  @ChildWorkerCommand(cmd="CDCETL", jvmArgs={"-Xms128m", "-Xmx324m"})
-  public static void doCdcEtlProcessing(String[] args, PrintStream rspStream) {
+  @ChildWorkerCommand(cmd="CDCETL", jvmArgs={"-Xms48m", "-Xmx128m"})
+  public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "doCdcEtlProcessing";
-    try (final PrintStream rsp = rspStream) {
-      assert(args.length > 0);
-      print_method_call_info(rsp, methodName, args);
+    assert args.length > 0;
 
-      s_args = childWorkerInitialization(Arrays.copyOfRange(args, 1, args.length),
-              jcmdr -> jcmdr.parse(String.join("=", cdcChildWorkerOptn, Boolean.TRUE.toString())));
-      rspStream.println(s_args); // dump toString() output to response stream; TODO should comment this out
+    final String cmd = args[0];
 
-      final String cmd_lc = args[0].toLowerCase();
-      final String pidFileBaseName = String.join("-", s_args.programName, cmd_lc);
+    int status_code = 0;
+
+    try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
+      print_method_call_info(errS, methodName, args);
+
+      s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
+            jcmdr -> jcmdr.parse(String.join("=", cdcChildWorkerOptn, Boolean.TRUE.toString())));
+      errS.println(s_args); // dump toString() output to error stream
+
+      final String pidFileBaseName = String.join("-", s_args.programName, cmd).toLowerCase();
 
       if (Spartan.isFirstInstance(pidFileBaseName)) {
 
-        doSimulatedEtlProcessing(args, rsp);
+        final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+        scheduler.scheduleAtFixedRate(() -> errS.print(resetBackoffToken), 3, 3, TimeUnit.SECONDS);
+
+        spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
 
       } else {
-        final String errmsg = format("Child command %s is already running", cmd_lc);
-        rsp.printf("WARNING: %s%n", errmsg);
+        final String errmsg = format("Child command %s is already running", cmd);
+        errS.printf("WARNING: %s%n", errmsg);
         log(LL_WARN, errmsg::toString);
+        status_code = 1;
       }
+    } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
+      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
+      e.printStackTrace(errStream);
+      status_code = 1;
+    }
+
+    System.exit(status_code);
+  }
+
+  @SupervisorCommand("INVOKECHILDCMD")
+  public void invokeChildCmd(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
+    final String methodName = "invokeChildCmd";
+    try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
+      assert args.length > 0;
+      print_method_call_info(outStream, methodName, args);
+      final String cmd = args[0];
+
+      if (args.length < 2) {
+        errS.println("ERROR: no child command specified - insufficient command line arguments");
+        return;
+      }
+      if (cmd.equalsIgnoreCase(args[1])) {
+        errS.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
+        return;
+      }
+
+      final InvokeResponseEx rsp = Spartan.invokeCommandEx(Arrays.copyOfRange(args, 1, args.length));
+      _pids.add(rsp.childPID);
+
+      // send the service's serialized configuration to the spawned child process
+      final ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(serializedCfgSettings.get());
+      copy(byteArrayInputStream, rsp.childInputStream);
+
+      // now use a Spartan Flow subscription to process all input streams of the spawned child process
+      final Subscriber subscriber = spartan.fstreams.Flow.subscribe(taskExecutor, rsp);
+      final FuturesCompletion futuresCompletion = subscriber
+          .onError((errStrm, subscription) -> copyWithClose(errStrm, errS, subscription))
+          .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outS, subscription))
+          .start();
+
+      try {
+        futuresCompletion.take().get();
+      } catch (ExecutionException e) {
+        final Throwable cause = e.getCause() != null ? e.getCause() : e;
+        uncheckedExceptionThrow(cause);
+      }
+    } catch (InterruptedException e) {
+      errStream.printf("%nWARN: %s: interruption occurred - processing may not be completed!%n", args[0]);
     } catch (Throwable e) {
-      e.printStackTrace(rspStream);
-      uncheckedExceptionThrow(e);
+      errStream.printf("%nERROR: %s: exception thrown:%n", (args.length > 0 ? args[0] : "{invalid command}"));
+      e.printStackTrace(errStream);
     }
   }
 
-  /**
-   * Just a helper method that does something and prints it to the supplied response output stream
-   * for the sake or illustration purpoeses in example programs. Calls on existing test code that
-   * is in the Spartan.jar library.
-   * <p/>
-   * <b>NOTE:</b> The presence of <i>-run-forever</i> option will cause it to run perpetually.
-   *
-   * @param args arguments being passed to the test code command
-   * @param rsp response output stream that is written to by the command's implementation
-   * @throws ClassNotFoundException
-   * @throws NoSuchMethodException
-   * @throws SecurityException
-   * @throws IllegalAccessException
-   * @throws IllegalArgumentException
-   * @throws InvocationTargetException
-   */
-  private static void doSimulatedEtlProcessing(String[] args, final PrintStream rsp)
-      throws ClassNotFoundException, NoSuchMethodException, SecurityException, IllegalAccessException,
-      IllegalArgumentException, InvocationTargetException
-  {
-    final Class<?> testSpartanCls = Class.forName("TestSpartan");
-    final Method childWorkerDoCommand = testSpartanCls.getMethod("childWorkerDoCommand", String[].class,
-        PrintStream.class);
-    // invoke Spartan built-in test code to simulate doing some processing
-    // (writes messages to the response stream at random intervals)
-    args[0] = "genesis";
-    childWorkerDoCommand.invoke(null, args, rsp);
+  private static long copyWithClose(InputStream fromStream, OutputStream toStream, Subscription subscription) {
+    try (final InputStream from = fromStream;
+         final OutputStream to = toStream;
+         final OutputStream ignored = subscription.getRequestStream())
+    {
+      return copy(from, to);
+    } catch (IOException e) {
+      uncheckedExceptionThrow(e);
+    }
+    return 0; // will never reach this statement, but hushes compiler
+  }
+
+  private static long copy(InputStream from, OutputStream to) throws IOException {
+    assert from != null;
+    assert to != null;
+    byte[] buf = new byte[BUF_SIZE];
+    long total = 0;
+    for (;;) {
+      int n = from.read(buf);
+      if (n == -1) break;
+      to.write(buf, 0, n);
+      total += n;
+    }
+    to.flush();
+    return total;
   }
 }
