@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import spartan.Spartan;
@@ -39,17 +40,38 @@ import spartan.util.io.ReadLine;
 public class App extends SpartanBase {
   private static final String clsName = App.class.getName();
   private static final Set<Integer> _pids = ConcurrentHashMap.newKeySet(53);
-  private final ExecutorService workerThread;
+  private final ExecutorService workerExecutor;
 
   // instance initialization (will run as a singleton object managed by Spartan)
   {
-    final AtomicInteger workerThreadNbr = new AtomicInteger(1);
-    this.workerThread = Executors.newCachedThreadPool(r -> {
+    final AtomicInteger threadNumber = new AtomicInteger(1);
+    workerExecutor = Executors.newCachedThreadPool(r -> {
       final Thread t = new Thread(r);
       t.setDaemon(true);
-      t.setName(String.format("%s-pool-thread-#%d", clsName, workerThreadNbr.getAndIncrement()));
+      t.setName(String.format("%s-pool-thread-#%d", clsName, threadNumber.getAndIncrement()));
       return t;
     });
+
+    // A service shutdown handler (will respond to SIGINT/SIGTERM signals and Spartan stop command);
+    // basically in this example program it just manages the ExecutorService thread pool for shutdown
+    final Thread shutdownHandler = new Thread(() -> {
+      workerExecutor.shutdown();
+      waitOnExecServiceTermination(workerExecutor, 5); // will await up to 5 seconds
+    });
+    Runtime.getRuntime().addShutdownHook(shutdownHandler);
+  }
+
+  @SuppressWarnings("SameParameterValue")
+  private static void waitOnExecServiceTermination(ExecutorService excSrvc, int waitTime) {
+    // waits for termination for waitTime (seconds only)
+    for (int i = waitTime; !excSrvc.isTerminated() && i > 0; i--) {
+      try {
+        excSrvc.awaitTermination(1, TimeUnit.SECONDS);
+      } catch (InterruptedException ignored) {
+      }
+      System.out.print('.');
+    }
+    excSrvc.shutdownNow();
   }
 
   /**
@@ -66,13 +88,13 @@ public class App extends SpartanBase {
    */
   @SupervisorMain
   public static void main(String[] args) {
-    log(LL_INFO, () -> format("%s: hello world - supervisor service has started!%n", programName));
+    log(LL_INFO, "hello world - supervisor service has started!"::toString);
 
     // TODO: do one time service initialization here
 
     enterSupervisorMode(_pids);
 
-    log(LL_INFO, () -> format("%s exiting normally", programName));
+    log(LL_INFO, "exiting normally"::toString);
   }
 
   /**
@@ -226,7 +248,7 @@ public class App extends SpartanBase {
       final PrintStream taskErrS = errStream; // the async task will take ownership of the error output stream
 
       // Asynchronously consume output from the invoked sub-command process and write it to the response stream
-      workerThread.execute(() -> {
+      workerExecutor.execute(() -> {
         //
         // Our example code below is only making use of rdr, outS, and taskErrS streams
         //
