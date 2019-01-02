@@ -209,7 +209,7 @@ public class App extends SpartanBase {
    * @param gzFilesList list of .gz files to be uncompressed
    * @param outS the output stream for writing progress information
    * @param errS the output stream for writing errors
-   * @return the number of task that completion result was successfully obtained
+   * @return the number child processes with completion results was successfully obtained
    * @throws IOException
    * @throws InvokeCommandException
    * @throws InterruptedException
@@ -246,7 +246,7 @@ public class App extends SpartanBase {
             .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outputFileStream, subscription));
     }
 
-    outS.printf("INFO %s: subscriptions added for %d files, now start processing...%n", cmd, gzFilesList.size());
+    outS.printf("INFO: %s: subscriptions added for %d files, now start processing...%n", cmd, gzFilesList.size());
 
     assert subscriber != null;
     final FuturesCompletion pendingFutures = subscriber.start();
@@ -309,10 +309,10 @@ public class App extends SpartanBase {
     // remove all empty error log files
     errLogFiles.stream().filter(isEmptyFile).forEach(deleteFile);
 
-    outS.printf("INFO: %s: %d subscription(s) completed - process pid(s):%n%s%n",
-          cmd, i, String.join(",", pids.toArray(new String[0])));
+    outS.printf("INFO: %s: %d subscription(s) completed - %d process pid(s):%n%s%n",
+          cmd, i, pids.size(), String.join(",", pids.toArray(new String[0])));
 
-    return i;
+    return pids.size();
   }
 
   private static long copyWithClose(InputStream fromStream, OutputStream toStream, Subscription subscription) {
@@ -355,7 +355,7 @@ public class App extends SpartanBase {
          final PrintStream errS = errStream;
          final InputStream inS = inStream)
     {
-      print_method_call_info(errS, methodName, args);
+//      print_method_call_info(errS, methodName, args);
       if (args.length < 2) {
         errS.printf("ERROR: %s: expected .gz file path - insufficient commandline arguments%n", cmd);
         status_code = 1;
