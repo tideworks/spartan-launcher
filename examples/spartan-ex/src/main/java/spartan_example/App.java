@@ -45,6 +45,7 @@ public class App extends SpartanBase {
   // instance initialization (will run as a singleton object managed by Spartan)
   {
     final AtomicInteger threadNumber = new AtomicInteger(1);
+
     workerExecutor = Executors.newCachedThreadPool(r -> {
       final Thread t = new Thread(r);
       t.setDaemon(true);
@@ -119,6 +120,31 @@ public class App extends SpartanBase {
   public void childProcessCompletionNotify(int pid) {
     super.childProcessCompletionNotify(pid);
     _pids.remove(pid);
+  }
+
+  /**
+   * Overriding status() method so can augment it with a little
+   * bit more information (default implementation list out any
+   * child processes that are active - will add some JVM info).
+   *
+   * @param statusRspStream stream where status output is written to
+   */
+  @Override
+  public void status(PrintStream statusRspStream) {
+    try (final PrintStream rsp = statusRspStream) {
+      statusHelper().forEach(rsp::println);
+      final Runtime rt = Runtime.getRuntime();
+      final int OneMegaByte = 1024 * 1024;
+      rsp.printf(
+            "Supervisor JVM:%n  total memory: %12d MB%n   free memory: %12d MB%n   used memory: %12d MB%n    max memory: %12d MB%n",
+            rt.totalMemory() / OneMegaByte,
+            rt.freeMemory() / OneMegaByte,
+            (rt.totalMemory() - rt.freeMemory()) / OneMegaByte,
+            rt.maxMemory() / OneMegaByte
+      );
+      rsp.println();
+      rsp.flush();
+    }
   }
 
   /**
@@ -235,36 +261,39 @@ public class App extends SpartanBase {
         outStream.println("ERROR: no child command specified - insufficient command line arguments");
         return;
       }
-      if (args[0].equalsIgnoreCase(args[1])) {
-        outStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
+
+      final String child_cmd = args[1];
+
+      if (cmd.equalsIgnoreCase(child_cmd)) {
+        outStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", child_cmd);
         return;
       }
 
+      // spawning a worker child process per the specified child sub-command
       final InvokeResponseEx rsp = Spartan.invokeCommandEx(Arrays.copyOfRange(args, 1, args.length));
       _pids.add(rsp.childPID);
 
       final PrintStream taskOutS = outStream; // the async task will take ownership of the output stream
       outStream = null; // null it out so that the outer try-finally block no longer will close it
-      final PrintStream taskErrS = errStream; // the async task will take ownership of the error output stream
 
-      // Asynchronously consume output from the invoked sub-command process and write it to the response stream
-      workerExecutor.execute(() -> {
+      // Asynchronously consumes output from the invoked sub-command process and writes it to the response stream
+      final Runnable detachedTask = () -> {
         //
-        // Our example code below is only making use of rdr, outS, and taskErrS streams
-        //
-        // NOTE: The Spartan Flow react interfaces/classes make it much easier to
-        // utilize all the streams of an invoked child process sub-command. So look
-        // at the spartan-react-ex example program for how to use that.
+        // Our example code below is only making use of rdr, outS, and errStream streams
         //
         // The old-style single response stream Spartan.InvokeCommand() would have been
         // better suited to this example, but then that would mean adding yet another
         // child sub-command that takes only a single PrintStream response output argument.
         //
+        // NOTE: The Spartan Flow react interfaces/classes make it much easier to utilize
+        // all the streams of an invoked child process sub-command. Take a look at the
+        // spartan-react-ex and spartan-cfg-ex example programs for how to use Spartan Flow.
+        //
         try (final Reader rdr = new InputStreamReader(rsp.inStream);
              final InputStream childErrS = rsp.errStream;
              final OutputStream childInS = rsp.childInputStream;
              final PrintStream outS = taskOutS;
-             final PrintStream errS = taskErrS)
+             final PrintStream errS = errStream)
         {
           // this is an example implementation and all that we do here
           // is write the child process output to the original invoker
@@ -281,9 +310,12 @@ public class App extends SpartanBase {
         } catch (Throwable e) {
           final String err = format("exception thrown so exiting thread: %s%n%s", Thread.currentThread().getName(), e);
           log(LL_ERR, err::toString); // logs the error message to the service's stderr
-          taskErrS.printf("%nERROR: %s: %s%n", cmd, err); // write's to the invoker's stderr
+          errStream.printf("%nERROR: %s: %s%n", cmd, err); // write's to the invoker's stderr
         }
-      });
+      };
+
+      workerExecutor.submit(detachedTask); // invoked worker child process will be managed by a supervisor detached task
+
     } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
       // if we got here then we never got into task execution so go
       // ahead and use and close error output stream to the invoker,
@@ -337,7 +369,10 @@ public class App extends SpartanBase {
     {
       print_method_call_info(outS, methodName, args);
 
+
+      /*### call a method here to do the real work of the worker child process sub-command ###*/
       spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
+
 
     } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
       errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
@@ -345,7 +380,7 @@ public class App extends SpartanBase {
       status_code = 1;
     }
 
-    System.exit(status_code);
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 
   /**
@@ -387,16 +422,18 @@ public class App extends SpartanBase {
     {
       print_method_call_info(outS, methodName, args);
 
-      final String cmd_lc = args[0].toLowerCase();
-      final String pidFileBaseName = String.join("-", "spartan-ex", cmd_lc);
+      final String pidFileBaseName = String.join("-", "spartan-ex", cmd).toLowerCase();
 
       if (Spartan.isFirstInstance(pidFileBaseName)) {
 
+
+        /*### call a method here to do the real work of the worker child process sub-command ###*/
         spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
 
+
       } else {
-        final String errmsg = format("Child command %s is already running", cmd_lc);
-        errS.printf("WARNING: %s%n", errmsg);
+        final String errmsg = format("Child command %s is already running", cmd);
+        errS.printf("%nWARNING: %s%n", errmsg);
         log(LL_WARN, errmsg::toString); // logs to the service's stderr
         status_code = 1;
       }
@@ -406,6 +443,6 @@ public class App extends SpartanBase {
       status_code = 1;
     }
 
-    System.exit(status_code);
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 }

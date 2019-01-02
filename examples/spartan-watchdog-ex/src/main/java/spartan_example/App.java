@@ -430,7 +430,10 @@ public class App extends SpartanBase {
         final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
         scheduler.scheduleAtFixedRate(() -> rsp.print(resetBackoffToken), 15, 15, TimeUnit.SECONDS);
 
+
+        /*### call a method here to do the real work of the worker child process sub-command ###*/
         spartan.test.invokeGenerateDummyTestOutput(args, rsp, rsp);
+
 
       } else {
         final String errmsg = format("Child command %s is already running", cmd_lc);
@@ -443,6 +446,6 @@ public class App extends SpartanBase {
       status_code = 1;
     }
 
-    System.exit(status_code);
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 }
