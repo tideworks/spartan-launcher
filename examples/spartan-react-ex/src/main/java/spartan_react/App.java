@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.zip.GZIPInputStream;
 
@@ -42,6 +43,7 @@ import static java.nio.file.StandardOpenOption.CREATE;
 import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.util.stream.Collectors.toList;
 
+@SuppressWarnings({"unused", "JavaDoc"})
 public class App extends SpartanBase {
   private static final Set<Integer> _pids = ConcurrentHashMap.newKeySet(53);
   private static final int BUF_SIZE = 0x4000;
@@ -117,7 +119,6 @@ public class App extends SpartanBase {
     rspStream.printf("DEBUG: invoked %s.%s(\"%s\")%n", App.class.getName(), methodName, output);
   }
 
-  @SuppressWarnings("unused")
   @SupervisorCommand("MASS_UNCOMPRESS")
   public void massUncompress(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "massUncompress";
@@ -187,11 +188,39 @@ public class App extends SpartanBase {
     return path;
   }
 
+  /**
+   * Core method that does the work of setting up Spartan Flow subsciptions to
+   * handle the processing of all the streams of invoked worker child processes
+   * (one worker spawned per each input file - two output streams per worker).
+   * <p>
+   * <b>NOTE:</b> An Executor can be selected (instead of accepting the default)
+   * to customize thread pool behavior, i.e., could use a constrained thread
+   * pool executor that is initialized in size based on number of CPU processors):
+   * {@link spartan.fstreams.Flow#subscribe(ExecutorService, InvokeResponseEx)}
+   * accepts an exectutor as the first argument.
+   * <p>
+   * After all subscriptions are established then uses the subscriber that method
+   * {@link Subscriber#start()} was invoked on to obtain a {@link FuturesCompletion};
+   * it then calls {@link FuturesCompletion#take()} to harvest the future result
+   * of each task.
+   *
+   * @param cmd name of supervisor sub-command that has been invoked (for logging purposes)
+   * @param srcDir the parent directory of the list of input files
+   * @param gzFilesList list of .gz files to be uncompressed
+   * @param outS the output stream for writing progress information
+   * @param errS the output stream for writing errors
+   * @return the number of task that completion result was successfully obtained
+   * @throws IOException
+   * @throws InvokeCommandException
+   * @throws InterruptedException
+   * @throws ClassNotFoundException
+   */
   private static int processGzFiles(String cmd, Path srcDir, List<Path> gzFilesList, PrintStream outS, PrintStream errS)
         throws IOException, InvokeCommandException, InterruptedException, ClassNotFoundException
   {
     final BiFunction<String, String[], Path> getPath = srcDir.getFileSystem()::getPath;
-    final List<Integer> childrenPIDs = new ArrayList<>(gzFilesList.size());
+    final List<Path> errLogFiles = new ArrayList<>(gzFilesList.size());
+    final List<Integer> childrenPIDs = new ArrayList<>(gzFilesList.size()); // use for audit check
 
     Subscriber subscriber = null;
 
@@ -204,6 +233,9 @@ public class App extends SpartanBase {
       final OutputStream errOutFileStream = Files.newOutputStream(errOutFile, CREATE, TRUNCATE_EXISTING);
       final OutputStream outputFileStream = Files.newOutputStream(outputFile, CREATE, TRUNCATE_EXISTING);
 
+      errLogFiles.add(errOutFile);
+
+      // invoking worker child process to do the desired transformation action on an input file...
       final InvokeResponseEx rsp = Spartan.invokeCommandEx("UN_GZIP", inputFile.toString());
       _pids.add(rsp.childPID);
       childrenPIDs.add(rsp.childPID);
@@ -223,7 +255,7 @@ public class App extends SpartanBase {
 
     int count = pendingFutures.count(); // number of task the ExecutorCompletionService will be processing to completion
 
-    final List<String> pids = new ArrayList<>(count); // for collecting returned child process pids as string values
+    final Set<String> pids = new LinkedHashSet<>(); // for collecting returned child process pids as string values
 
     int i = 0;
     try {
@@ -255,6 +287,27 @@ public class App extends SpartanBase {
       errS.printf("ERROR: %s: %d subscription(s) futures results unharvested:%n%s%n",
             cmd, remaining.size(), String.join(",", remaining.toArray(new String[0])));
     }
+
+    final Predicate<Path> isEmptyFile = path -> {
+      boolean rtn = true;
+      try {
+        rtn = Files.size(path) <= 0;
+      } catch (IOException e) {
+        uncheckedExceptionThrow(e);
+      }
+      return rtn;
+    };
+
+    final Consumer<Path> deleteFile = path -> {
+      try {
+        Files.deleteIfExists(path);
+      } catch (IOException e) {
+        uncheckedExceptionThrow(e);
+      }
+    };
+
+    // remove all empty error log files
+    errLogFiles.stream().filter(isEmptyFile).forEach(deleteFile);
 
     outS.printf("INFO: %s: %d subscription(s) completed - process pid(s):%n%s%n",
           cmd, i, String.join(",", pids.toArray(new String[0])));
@@ -289,23 +342,6 @@ public class App extends SpartanBase {
     return total;
   }
 
-  /**
-   * Exceptions derived from {@link Throwable}, especially {@link Exception} derived
-   * classes, are re-thrown as unchecked.
-   *
-   * <p/><i>Rethrown exceptions are not wrapped yet the compiler does not detect them as
-   * checked exceptions at compile time so they do not need to be declared in the lexically
-   * containing method signature.</i>
-   *
-   * @param t an exception derived from java.lang.Throwable that will be re-thrown
-   * @return R generic argument allows for use in return statements (though will throw
-   *           exception and thus never actually return)
-   * @throws T the re-thrown exception
-   */
-  @SuppressWarnings("all")
-  private static <T extends Throwable, R> R uncheckedExceptionThrow(Throwable t) throws T { throw (T) t; }
-
-  @SuppressWarnings("unused")
   @ChildWorkerCommand(cmd = "UN_GZIP", jvmArgs = {"-server", "-Xms64m", "-Xmx128m"})
   public static void uncompressGzFile(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
     final String methodName = "uncompressGzFile";
@@ -329,7 +365,7 @@ public class App extends SpartanBase {
           status_code = 1;
         } else {
 
-          status_code = uncompressGzFileDoIt(cmd, filePath, outS, errS, inS);
+          status_code = uncompressGzFileCore(cmd, filePath, outS, errS, inS);
 
         }
       }
@@ -339,10 +375,10 @@ public class App extends SpartanBase {
       status_code = 1;
     }
 
-    System.exit(status_code);
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 
-  private static int uncompressGzFileDoIt(String cmd, Path filePath, OutputStream outS, PrintStream errS,
+  private static int uncompressGzFileCore(String cmd, Path filePath, OutputStream outS, PrintStream errS,
                                           InputStream inS)
   {
     try {
@@ -359,8 +395,24 @@ public class App extends SpartanBase {
     } catch (IOException e) {
       errS.printf("ERROR: %s: failed un-compressing file: \"%s\"%n", cmd, filePath);
       e.printStackTrace(errS);
-      return 1;
+      return 1; // non-zero indicates that failed
     }
-    return 0;
+    return 0; // zero indicates successful completion
   }
+
+  /**
+   * Exceptions derived from {@link Throwable}, especially {@link Exception} derived
+   * classes, are re-thrown as unchecked.
+   *
+   * <p/><i>Rethrown exceptions are not wrapped yet the compiler does not detect them as
+   * checked exceptions at compile time so they do not need to be declared in the lexically
+   * containing method signature.</i>
+   *
+   * @param t an exception derived from java.lang.Throwable that will be re-thrown
+   * @return R generic argument allows for use in return statements (though will throw
+   *           exception and thus never actually return)
+   * @throws T the re-thrown exception
+   */
+  @SuppressWarnings("all")
+  private static <T extends Throwable, R> R uncheckedExceptionThrow(Throwable t) throws T { throw (T) t; }
 }
