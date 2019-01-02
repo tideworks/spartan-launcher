@@ -1,3 +1,22 @@
+**NEW!** Spartan Flow react-style class and interfaces are here! And the new `Spartan.invokeCommandEx()` API that powers them:
+```java
+/* class */
+spartan.fstreams.Flow
+
+/* interfaces */
+spartan.fstreams.Flow.Subscriber
+spartan.fstreams.Flow.Subscription
+spartan.fstreams.Flow.FuturesCompletion
+
+/* static methods */
+Subscriber Flow.subscribe(InvokeResponseEx rsp);
+Subscriber Flow.subscribe(ExecutorService executorService, InvokeResponseEx rsp);
+
+/* forks a child process from Java program - use Flow subscriptions to manage */
+/* interactions with the invoker, especialy when many concurrent invocations  */
+InvokeResponseEx Spartan.invokeCommandEx(String... args);
+```
+
 # spartan "forking" java program launcher
 
 From Wikipedia: [Fork (system call)](https://en.wikipedia.org/wiki/Fork_%28system_call%29)
@@ -216,13 +235,15 @@ These **spartan** *kill* APIs can be used to terminate spawned children processe
 
 ```java
   static void killSIGINT(int pid) throws KillProcessException;
+  static void killSIGTERM(int pid) throws KillProcessException;
   static void killSIGKILL(int pid) throws KillProcessException;
   
   static void killProcessGroupSIGINT(int pid) throws KillProcessException, KillProcessGroupException;
+  static void killProcessGroupSIGTERM(int pid) throws KillProcessException, KillProcessGroupException;
   static void killProcessGroupSIGKILL(int pid) throws KillProcessException, KillProcessGroupException;
 ```
 
-An invoked sub command establishes a process group (dynamically). So `killProcessGroupSIGINT|KILL` can be used to terminate multiple spawned process instances that are executing the same sub command. The pid of any one of the process instances can be passed to the call and the entire group will be terminated.
+An invoked sub command establishes a process group (dynamically). So `killProcessGroupSIGTERM|KILL` can be used to terminate multiple spawned process instances that are executing the same sub command. The pid of any one of the process instances can be passed to the call and the entire group will be terminated.
 
 #### `spartan` interplay with standard Linux shell commands
 
@@ -236,7 +257,7 @@ The `status` supervisor sub command can be used to produce a listing of active w
     spartan-cfg-ex: INFO: starting process 15968
     
         *** timestamp ***    |  *** pid *** | *** command-line ***
-     2018-01-04T12:18:08.184          31434   "etl" "-run-forever" "some.json.gz"
+     2018-01-04T12:18:08.184          31434   "cdcetl" "-run-forever" "some.json.gz"
     1 child processes active
     
     spartan-cfg-ex: INFO: process 15968 exiting normally
@@ -255,18 +276,18 @@ If is a supervisor sub command, then the supervisor process will handle the comm
 
 If the sub command is a worker child process command, spartan sees to it that a child process is spawned to carry out the command. Once again the client mode process prints any output to `stdout`.
 
-We have already seen above that a supervisor process can use the `Spartan.invokeCommand` API call to cause a worker child process to be spawned. In that case the supervisor process will be receiving the output of the child process. The spartan client mode process was active just long enough for getting the sub command recognized and spawned as a child process then it went away.
+We have already seen above that a supervisor process can use the `Spartan.invokeCommand` API call to cause a worker child process to be spawned. In that case the supervisor process will be receiving the output of the child process.
 
 It is very easy to now do Java programming which makes use of spawned child processes. But it is also super easy to write shell scripts that invoke sub commands and do things with their output. Thus **spartan** brings the Java programming language fully into the embrace of true Linux platform power - service daemons, command line shell interaction, shell scripts, compatible use of process pids, Linux commands (`ps`, `kill`, `top`), Linux user account for controlling permissions access, etc., etc. Everything Linux aficionados do with Linux native programs written in C or C++, they can now easily do with Java programs. In a sense, **spartan** makes Java a first class citizen of the Linux platform.
 
 ### Requirements for building `spartan`:
 
-**Spartan** has been built and tested on RedHat/Centos distros of 6.7 and 7.4 (and Fedora 26, 27 as well as Ubuntu 14.04.5). Spartan consist of both Java and C++11 source code. It is built via the Java build tool, Maven. A Maven plugin is used to invoke `cmake`, which in turn compiles and links the C++ source code using GNU g++ compiler. Here are build provisioning prerequisites:
+**Spartan** has been built and tested on RedHat/Centos distros of 6.7 and 7.4 (and Fedora 26, 27 as well as Ubuntu 14.04.5 - when Docker containerized, Spartan-based programs have run on CentOS 6.1 distro!) Spartan consist of both Java and C++11 source code. It is built via the Java build tool, Maven. A Maven plugin is used to invoke `cmake`, which in turn compiles and links the C++ source code using GNU g++ compiler. Here are build provisioning prerequisites:
 
 - **Java SDK 1.8.0**
 - **Maven 3.x.x**
-- **cmake 2.8.11 through cmake 3.10.0**
-- **g++ 4.8.4 (C++11) through g++ 7.2.1 (C++17)** (the spartan code base is currently C++11 compliant)
+- **cmake 2.8.11 through cmake 3.13.x**
+- **g++ 4.8.x (C++11) through g++ 8.2.x (C++17)** (the spartan code base is currently C++11 compliant)
 - **popt-devel C library** (locate a package dialed in closely to your Linux distro version)
     - for RedHat/Centos 6.7 through 7.x:
       [popt-devel-1.13-16.el7.x86_64.rpm](https://centos.pkgs.org/7/centos-x86_64/popt-devel-1.13-16.el7.x86_64.rpm.html)
@@ -276,6 +297,40 @@ It is very easy to now do Java programming which makes use of spawned child proc
       [libpopt-dev_1.16-8ubuntu1_amd64.deb](https://ubuntu.pkgs.org/14.04/ubuntu-main-amd64/libpopt-dev_1.16-8ubuntu1_amd64.deb.html)
       - refer to this repository to locate other deb packages suitable to Debian/Ubuntu-syle Linux distros:  
         [https://pkgs.org/download/libpopt-dev](https://pkgs.org/download/libpopt-dev)
+
+The `libpopt.so` runtime shared library is actually installed in most distributions of Linux. However, installing the popt package provides for a header file for compilation and a link library when building the Spartan C++ code base.
+
+#### A word about compiler choice - latest stable relase gcc/g++ 8.2.x or the older 4.8.x?
+
+For release builds, the g++ 4.8 and 8.2 compilers generate binaries that are fairly close in size - when dependent library code is linked as shared libraries. However, Spartan is compiled with the option `-static-libstdc++`, which specifies to statically link the C++ standard runtime library. This is done to maximize the ability of Spartan to execute on different versions and distros of Linux and/or to avoid distributing and installing the C++ standard library. The glibc C library is not statically linked because the use of `-fPIC` and `-static` are not compatible options, but glibc is less problamatic than the C++ standard library dependencies.
+
+It turns out statically linking the C++ standard libary leads to a significant difference in the size of the resulting binaries:
+
+##### g++ 4.8.4 - release builds
+*file sizes for build using dynamically-linked C++ shared library (libstdc++.so.6)*
+```
+ -rwxr-xr-x 1 buildr buildr    6280 Dec 24 09:55 spartan
+ -rwxr-xr-x 1 buildr buildr  437522 Dec 24 09:55 libspartan-shared.so
+```
+*file sizes for build using statically-linked C++ runtime library (-static-libstdc++)*
+```
+ -rwxr-xr-x 1 buildr buildr    6280 Dec 23 22:26 spartan
+ -rwxr-xr-x 1 buildr buildr 1490261 Dec 23 22:26 libspartan-shared.so
+```
+##### g++ 8.2.1 - release builds
+*file sizes for build using dynamically-linked C++ shared library (libstdc++.so.6)*
+```
+ -rwxr-xr-x 1 buildr buildr   14352 Dec 24 18:55 spartan
+ -rwxr-xr-x 1 buildr buildr  449576 Dec 24 18:55 libspartan-shared.so
+```
+*file sizes for build using statically-linked C++ runtime library (-static-libstdc++)*
+```
+ -rwxr-xr-x 1 buildr buildr   14352 Dec 24 18:48 spartan
+ -rwxr-xr-x 1 buildr buildr 2280104 Dec 24 18:48 libspartan-shared.so
+```
+The g++ C++17 standard has a rather more complex and heavy weight runtime library than the orginal C++11 compliant g++ - not surprising. However, because the Spartan C++ code base hasn't been committed to going beyound the C++11 standard, for my company's production purposes I build Spartan using g++ 4.8.x to get the smaller binary sizes. I then do active development using the g++ 8.2.x compiler - always keeping the door open to move forward to the latest compiler.
+
+#### Maven configuration
 
 You might choose to have the following environment variables defined in your `spartan` build context, setting directory paths appropriately to match your installation (it's possible to build `spartan` on a 512 MB VM but you may have to reduce Maven max Java heap to, say, -Xmx208m, which then leaves sufficient memory for the `cmake` portion of the build):
 
@@ -321,15 +376,29 @@ Spartan makes use of these open source Java libraries:
   </dependencies>
 ```
 
-The spartan Java API is made available per the `Spartan.jar` library, which will be located in the `spartan` installation directory. When doing a Maven build, use the `install` goal so that `Spartan.jar` will be installed in your Maven local repository, there it will be available for when building the `spartan` example programs.
+The Spartan Java API is made available per the `Spartan.jar` library, which will be located in the `spartan` installation directory. When doing a Maven build, use the `install` goal so that `Spartan.jar` will be installed in your Maven local repository, there it will be available for when building the `spartan` example programs.
+
+A Java program that is using Spartan will need to include this build-time dependency (define `${spartan.version}` appropriately):
+
+```xml
+  <dependencies>
+    <dependency>
+      <groupId>com.tideworks.etl</groupId>
+      <artifactId>Spartan</artifactId>
+      <version>${spartan.version}</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+```
 
 ### `spartan` example programs
 
-There are three `spartan` example programs located in the `examples` sub-directory:
+There are four `spartan` example programs located in the `examples` sub-directory:
 
-- **spartan-ex** : illustrates all the Spartan annotations, also shows how to do a *singleton worker child process sub command*, as well as how to use `Spartan.invokeCommand()`
-- **spartan-cfg-ex** : illustrates how the *supervisor* service main thread can serialize `JCommander` object instance to a file so that worker child process sub commands can de‑serialize from that file in order to populate their `JCommander` object
+- **spartan-ex** : illustrates all the Spartan annotations, also shows how to do a *singleton worker child process sub-command*, as well as how to use `Spartan.invokeCommand()` API
+- **spartan-cfg-ex** : illustrates how the *supervisor* service can serialize a `JCommander` object instance into a memory buffer and then copy that buffer to the `stdin` input stream of invoked worker child process sub-commands; the configuration input stream is then de‑serialized by a child process to populate its `JCommander` object
 - **spartan-watchdog-ex** : illustrates how to code the *supervisor* to be a watchdog over some worker child process that it runs continuously
+- **spartan-react-ex** : illustrates use of the new `Flow` class and related interfaces that help take advantage of the new `Spartan.invokeCommandEx()` API
 
 Each is built using Maven, which produces a `.jar` file of the program in the respective `target` directory. The .jar file is what should be copied to a runtime directory; the `spartan-cfg-ex` program also requires the file `examples/spartan-cfg-ex/target/config.properties` and `jcommander-1.72.jar` to be copied to accompany it's `.jar` file.
 
@@ -342,13 +411,14 @@ We will illustrate using **spartan-cfg-ex**. We will place all the programs disc
 Install `spartan` into an `/opt/` sub-directory:
 
 ```shell
--rw-r--r-- 1 spartan spartan   9171 Jan  4 11:19 /opt/spartan/APACHE20-LICENSE.txt
--rw-r--r-- 1 spartan spartan   1510 Jan  4 11:19 /opt/spartan/BSD-LICENSE.txt
--rw-r--r-- 1 spartan spartan    193 Jan  4 11:20 /opt/spartan/config.ini
--rw-r--r-- 1 spartan spartan 750581 Apr  9  2016 /opt/spartan/javassist-3.20.0-GA.jar
--rwxr-xr-x 1 spartan spartan 218614 Jan  4 11:20 /opt/spartan/libspartan-shared.so
--rwxr-xr-x 1 spartan spartan 260801 Jan  4 11:20 /opt/spartan/spartan
--rw-r--r-- 1 spartan spartan  59015 Jan  4 11:20 /opt/spartan/Spartan.jar
+-rw-r--r-- 1 buildr buildr    9171 Dec  2 16:27 /opt/spartan/APACHE20-LICENSE.txt
+-rw-r--r-- 1 buildr buildr    1510 Dec  2 16:27 /opt/spartan/BSD-LICENSE.txt
+-rw-r--r-- 1 buildr buildr    1503 Dec  2 17:48 /opt/spartan/MIT-LICENSE.txt
+-rw-r--r-- 1 buildr buildr     193 Dec 26 13:42 /opt/spartan/config.ini
+-rw-r--r-- 1 buildr buildr  750581 Apr  9  2016 /opt/spartan/javassist-3.20.0-GA.jar
+-rw-r--r-- 1 buildr buildr   62687 Jan  1 13:37 /opt/spartan/Spartan.jar
+-rwxr-xr-- 1 buildr buildr 1584346 Dec 30 18:25 /opt/spartan/libspartan-shared.so
+-rwxr-xr-- 1 buildr buildr    6280 Dec 30 18:25 /opt/spartan/spartan
 ```
 
 For ease of running the example programs, execution permission is set for all users (normally it would be preferable if only owning user and group are granted execution permission):
@@ -390,7 +460,9 @@ ChildProcessMaxCount=30
 LoggingLevel=INFO
 ```
 
-The logging level setting here is for the `spartan` program itself and when Java code calls `Spartan.log()` API; the Java program will likely use logback, log4j, etc., for application logging in which case logging verbosity will be set through some other means for the general application logging.
+The logging level setting here is for the `spartan` program itself and for when Java code calls `Spartan.log()` API; a realistic Java program will likely use logback, log4j, etc., for application logging in which case logging verbosity will be set through some other means for the general application logging. When ran as a service, then service scripts will likely pipe the output of `stdout` and `stderr` to `/dev/null`, as there is no file rotation/deletion management, etc., for the Spartan executable manner of logging output - it is intended for debugging purposes and confirmation of proper operation.
+
+**NOTE:** There is a logback appender in the `Spartan.jar` library that enables a Java program to log hard errors to the Linux syslog.
 
 Spartan currently only uses `JAVA_HOME` environment variable to locate the Java JVM shared library, so that will need to be defined appropriately in the runtime context of invoking the service.
 
@@ -402,42 +474,42 @@ Using the symbolic link name as the name of the program that is being run as a s
 
 ```shell
 $ ps -C spartan-cfg-ex -Fww
-UID        PID  PPID  C    SZ   RSS PSR STIME TTY          TIME CMD
-my_user  31533  4301  0  30732 11240  0 03:24 pts/13   00:00:00 ./spartan-cfg-ex -service
-my_user  31534 31533  2 494796 40132  0 03:24 pts/13   00:00:00 ./spartan-cfg-ex -service
+UID         PID  PPID  C    SZ   RSS PSR STIME TTY          TIME CMD
+my_user   31575 31574  0  46192  1796  0 13:43 pts/27   00:00:00 ./spartan-cfg-ex -service
+my_user   31576 31575  0 634323 35448  0 13:43 pts/27   00:00:17 ./spartan-cfg-ex -service
 ```
 
 The listing shows two processes but one is the parent launcher process that *fork* launched the *supervisor process*, which runs a Java JVM instance; the other is that *supervisor process* itself.
 
-If a *worker child process sub command* has been invoked, then the `ps` listing might look something like:
+If a *worker child process sub-command* has been invoked, then the `ps` listing might look something like:
 
 ```shell
 $ ps -C spartan-cfg-ex -Fww
 UID        PID  PPID  C    SZ   RSS PSR STIME TTY          TIME CMD
-my_user  31533  4301  0  47116 11240  0 03:24 pts/13   00:00:00 ./spartan-cfg-ex -service
-my_user  31534 31533  0 496845 43044  0 03:24 pts/13   00:00:01 ./spartan-cfg-ex -service
-my_user  31595  4325  0   6109  3804  0 03:30 pts/14   00:00:00 ./spartan-cfg-ex cdcetl -run-forever some.json.gz
-my_user  31596 31533  3 563971 35620  0 03:30 pts/13   00:00:00 ./spartan-cfg-ex -service
+my_user  31575 31574  0  46192   796  1 13:43 pts/27   00:00:00 ./spartan-cfg-ex -service
+my_user  31576 31575  0 634323 36096  1 13:43 pts/27   00:00:17 ./spartan-cfg-ex -service
+my_user   8048  6705  0   5329  1604  0 21:01 pts/28   00:00:00 ./spartan-cfg-ex cdcetl -run-forever some.json.gz
+my_user   8050 31575  0 548061 24372  1 21:01 pts/27   00:00:00 ./spartan-cfg-ex -service
 ```
 
-The process pid 31595 in this case is `spartan` invoked in client mode in order to handle launching a worker child process - the command line to the sub command `cdcetl` is displayed here. The actual worker child process is pid 31596, which has another instantiated Java JVM instance. The `-service` option appearing on the JVM child process is just an artifact of the `fork()` call being utilized, but in actuality that child process received the command line arguments it was invoked with.
+The process pid 8048 in this case is `spartan` invoked in client mode in order to handle launching a worker child process - the command line to the sub command `cdcetl` is displayed here. The actual worker child process is pid 8050, which has another instantiated Java JVM instance. The `-service` option appearing on the JVM child process is just an artifact of the `fork()` call being utilized, but in actuality that child process received the command line arguments it was invoked with.
 
 Presuming that the service is running foreground in one terminal console, then by opening another terminal, the command to see application status can be issued (notice the use of `sudo` to invoke the command as the same user the service is running as):
 
 ```shell
 $ sudo -u my_user /opt/spartan-cfg-ex/spartan-cfg-ex status
-spartan-cfg-ex: INFO: starting process 31639
+spartan-cfg-ex: INFO: starting process 8117
 
     *** timestamp ***    |  *** pid *** | *** command-line ***
- 2018-01-29T03:56:49.440          31596   "cdcetl" "-run-forever" "some.json.gz"
+ 2019-01-01T21:01:49.986           8050   "/tmp/spartan-cfg-ex_JLauncher_UDS_8048_16" "cdcetl" "-run-forever" "some.json.gz"
 1 child processes active
 
-spartan-cfg-ex: INFO: process 31639 exiting normally
+spartan-cfg-ex: INFO: process 8117 exiting normally
 ```
 
-The pid 31639 is `spartan` as invoked in client mode (the client mode process handles the output generated by the sub command by echoing it to `stdout`).
+The pid 8048 process is `spartan` as invoked in client mode; a Spartan client mode process handles the output generated by the sub-command by echoing it to `stdout`, where shell redirection can be applied, etc.
 
-Then to terminate the service, which will cause all processes to exit, can issue the *supervisor* `stop` sub command:
+Then to terminate the service, which will cause all processes to exit, can issue the *supervisor* `stop` sub-command:
 
 ```shell
 $ sudo -u my_user /opt/spartan-cfg-ex/spartan-cfg-ex stop
@@ -451,29 +523,28 @@ This command line will cause a singleton worker child process to be launched:
 $ sudo -u my_user /opt/spartan-cfg-ex/spartan-cfg-ex cdcetl -run-forever some.json.gz
 ```
 
-**Tip:** *Keep in mind that if file paths are passed as arguments to a sub command, the user that the service runs as will need to have access permission established to that file. The example programs are not taking real files as arguments - they only serve for illustrating passing various arguments to sub commands.*
+**Tip:** *Keep in mind that if file paths are passed as arguments to a sub command, the user that the service runs as will need to have access permission established to that file. The example programs are not taking real files as arguments - they only serve the purpose of illustrating the passing of various arguments to sub-commands.*
 
-A `spartan` *singleton* refers to a worker child process sub command that is restricted to being run as a single process at any given time. The `Spartan.isFirstInstance()` API is used to establish a fence around the core activity of the singleton sub command.
+A `spartan` *singleton* refers to a worker child process sub-command that is restricted to being run as a single process at any given time. The `Spartan.isFirstInstance()` API is used to establish a fence around the core activity of the singleton sub-command.
 
-The normal posture is that multiple instances of a worker child process sub command can be invoked to run concurrently. The sub command `genetl` is an example of a command that can be invoked to run many times concurrently; can try it out by using the same command line as above but change `cdcetl` to `genetl` (will have to start another terminal to run each sub command, or else use a utility such as GNU Screen). All of these child processes will be listed by the `status` command - `spartan` keeps track of when these child processes are launched and when they terminate so the status stays updated automatically.
+The normal posture is that multiple instances of a worker child process sub-command can be invoked to run concurrently. The sub-command `genetl` is an example of a command that can be invoked to run many times concurrently; can try it out by using the same command line as above but change `cdcetl` to `genetl` (will have to start another terminal to run each sub-command, or else use a utility such as GNU Screen). All of these child processes will be listed by the `status` command - `spartan` keeps track of when these child processes are launched and when they terminate so the status stays updated automatically.
 
-**NOTE:** *Currently the `spartan` client mode does not respond to Control-C - the child process at the other end of the pipe it is reading from can instead be caused to terminate by using `kill -TERM` on its pid, which the client mode will sense as the pipe will indicate no more input to be read.*
+**NOTE:** *Currently the `spartan` client mode allows Control-C for ending a session with a child process at the other end of the pipe. Control-C termination is disallowed if the other end of the pipe is the supervisor process. When Control-C is handled a signal is sent to the child process to tell it to terminate. This is disallowed, though, when the other process would be the supervisor process of the service itself.*
 
 ## `spartan` road map - a hat tip to reactive programming
 
-Spartan has been in production use for over a year, but its development began back in 2015. It originated when C++11 and Java 8 were new. Now C++17 and Java 10 are the latest. In the Java community, the Jetbrains Kotlin language has been making an impact (with quite the boost from Google's adoption of Kotlin for Android programming).
+Spartan has been in production use for going on two years, but its development began back in 2015. It originated when C++11 and Java 8 were new. Now C++17 and Java 10 are the latest and Java 11 is eminent and C++20 a year away. In the Java community, the Jetbrains Kotlin language has been making an impact (with quite the boost from Google's adoption of Kotlin for Android programming).
 
-- For the time being the `spartan` C++11 code base will remain compileable in g++ 4.8.2 as that has been sufficient for its functionality.
+- For the time being the `spartan` C++11 code base will remain compileable in g++ 4.8.x as that has been sufficient for its functionality and yields relatively small binaries when the C++ standard library is statically linked.
 - It's possible that `spartan` might support Kotlin as is but no attempt has been made to try it out yet (not using Kotlin in the day job so hasn't been a priority).
 - Java 8 is the only Java language version supported so far. Yet Java 10 is here now and will definitely be important to support. That will require a new round of significant development and testing effort (making sure to support Java modularity introduced in Java 9).
-- Implement Control-C (SIGINT signal) handling for the `spartan` client mode
-    - *it needs to convey SIGTERM to child process at other end of pipe, or if is reading from the supervisor, should just break off reading its output*
 - Miscellaneous improvements (relatively easy enhancements):
     - provide for special variables that can be used in the `config.ini` file to denote the `spartan` install directory path and the directory path where the symbolic link is located
     - `spartan` private environment variable `SPARTAN_JAVA_HOME` that will take precedence over `JAVA_HOME` if it is defined
-- Spartan Java API to allow for authentication as a Linux user
-    - *current security model is pretty simple - this prys the door open to greater complexity, so very iffy on this feature*
-- Addition of a new, enhanced, reactive programming API, loosely based on the Java-9-introduced `java.util.concurrent.Flow` interfaces. This reactive API is specifically for invoking worker child process sub commands. A new `invoke` method will return an extended `InvokeResponseEx` object:
+
+**THIS IS NOW IMPLEMENTED!** ==>>
+
+- Addition of a new, enhanced, reactive-styled programming API, loosely based on the Java-9-introduced `java.util.concurrent.Flow` interfaces. This reactive programming influenced API is specifically for invoking worker child process sub commands. A new `invoke` method will return an extended `InvokeResponseEx` object:
 
 ```java
   class InvokeResponse {
@@ -498,7 +569,7 @@ Spartan has been in production use for over a year, but its development began ba
   static InvokeResponseEx invokeCommandEx(String... args) { ... }
 ```
 
-Instead of the class inheritance/interface programming model that `java.util.concurrent.Flow` mandates (concrete classes must be created which implement the `Flow` interfaces such as `Subscriber`), the **spartan** approach is a lambda-styled API. Here are proposed interfaces for `spartan.fstreams.Flow`:
+Instead of the class inheritance/interface programming model that `java.util.concurrent.Flow` mandates (concrete classes must be created which implement the `Flow` interfaces such as `Subscriber`), the **spartan** approach is a lambda-styled API. Here are interfaces from `spartan.fstreams.Flow`:
 
 ```java
 public final class Flow {
@@ -510,7 +581,7 @@ public final class Flow {
   }
 
   public interface Subscription {
-    void cancel();
+    void cancel() throws Exception;
     OutputStream getRequestStream();
   }
 
@@ -518,10 +589,12 @@ public final class Flow {
     Future<Integer> poll();
     Future<Integer> poll(long timeout, TimeUnit unit) throws InterruptedException;
     Future<Integer> take() throws InterruptedException;
+    ExecutorService getExecutor();
     int count();
   }
 
   public static Subscriber subscribe(InvokeResponseEx rsp) { ... }
+  public static Subscriber subscribe(ExecutorService executorService, InvokeResponseEx rsp) { ... }
 }
 ```
 
@@ -543,9 +616,10 @@ Here is an example of how to program to this lambda-oriented reactive API:
     try {
       int childPID = futures.take().get();
     } catch (ExecutionException e) {
-      log.error("exception encountered in sub task:", e);
+      final Throwable cause = e.getCause() != null ? e.getCause() : e;
+      log.error("exception encountered in sub task:", cause);
     } catch (InterruptedException e) {
-      log.warn("interruption occurred");
+      log.warn("interruption occurred - processing may be imcomplete");
     }
   }
 ```
@@ -569,9 +643,10 @@ Multiple child worker subprocesses can be invoked and then their respective subs
     try {
       int childPID = futures.take().get();
     } catch (ExecutionException e) {
-      log.error("exception encountered in sub task:", e);
+      final Throwable cause = e.getCause() != null ? e.getCause() : e;
+      log.error("exception encountered in sub task:", cause);
     } catch (InterruptedException e) {
-      log.warn("interruption occurred");
+      log.warn("interruption occurred - processing may be imcomplete");
     }
   }
 ```
@@ -590,51 +665,54 @@ Or the subscribers could be chained via loop iteration - here we see subscribers
     final File outputFile = new File(inputFile.getParent(), outputFileName);
     final OutputStream errOutFileStream = Files.newOutputStream(errOutFile.toPath(), CREATE, TRUNCATE_EXISTING);
     final OutputStream outputFileStream = Files.newOutputStream(outputFile.toPath(), CREATE, TRUNCATE_EXISTING);
+
     final InvokeResponseEx rsp = Spartan.invokeCommandEx("UN_GZIP", inputFile.getPath());
     childPIDs.add(rsp.childPID);
+
     subscriber = subscriber == null ? spartan.fstreams.Flow.subscribe(rsp) : subscriber.subscribe(rsp);
     subscriber
         .onError((errStrm, subscription) -> copyWithClose(errStrm, errOutFileStream, subscription))
         .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outputFileStream, subscription));
   }
 
+  assert subscriber != null;
   final FuturesCompletion futures = subscriber.start();
 
   int count = futures.count();
-  final String[] pids = new String[count];
-  int i = 0;
 
   while(count-- > 0) {
     try {
       final Integer childPID = futures.take().get();
       childPIDs.remove(childPID);
-      pids[i++] = childPID.toString();
     } catch (ExecutionException e) {
-      log.error("exception encountered in sub task:", e);
+      final Throwable cause = e.getCause() != null ? e.getCause() : e;
+      log.error("exception encountered in sub task:", cause);
     } catch (InterruptedException e) {
-      log.warn("interruption occurred");
+      log.warn("interruption occurred - processing may be imcomplete");
     }
   }
+
+  // childPIDs.size() == 0 should now be true
 ```
 
 Notice that in the first iteration pass through the loop the subscriber is established via the static method `Flow.subscribe(...)` call and then thereafter via the instance method `subscribe(...)` call.
 
-The new `Flow` interfaces and the above depicted style of programming have already been proved out in a prototyping test bed application.
+Use of the new `Flow` interfaces are illustrated in the `spartan-react-ex` and `spartan-cfg-ex` example programs.
 
-This feature will also require the addition of a new annotation which will be associated to a new method entry point signature for child worker subcommands. The method signature will have two additional stream arguments like so:
+Sub-command entry-point methods will now have a method signature that has two additional stream arguments like so:
 
 ```java
-  @ChildWorkerCommandEx(cmd="CDCETL", jvmArgs={"-Xms128m", "-Xmx324m"})
+  @ChildWorkerCommand(cmd="CDCETL", jvmArgs={"-Xms48m", "-Xmx256m"})
   public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) { ... }
 ```
 
-Also, the new `Spartan.invokeCommandEx(...)` method still remains to be implemented - it will require support in the underlying C++ **spartan** program launcher.
+The new `Spartan.invokeCommandEx(...)` method is used to programmatically invoke these sub-command methods sporting three streams as arguments. These sub-commands can be invoked from the command line just as before but now they will interact with the spartan client mode for handling of stderr and stdin in addition to stdout.
 
 Working with the lambda-centric **spartan** `Flow` interfaces is rather eye opening in itself - it is a much more accomodating programming model than the `Flow` interfaces programming model introduced in Java 9. Frankly, that was the old style of Java programming that predates Java 8 and it is unfortunate that reactive programming for Java, as introduced in Java 9, was based on this (the reactive programming standard it is adhering to is just plain out of date in respect to contemporary Java programming practices).
 
 One thing that will be noticed is that the **spartan** `Flow` interfaces deal with `InputStream` and `OutputStream`. The intent is to allow direct use of the stream communication pipes to the child worker process. The Java 9 `Flow` approach uses generic type templating and passes materialized objects to a subscriber. My personal use of **spartan** child worker processes to date is such that their output is consumed by a special zero-garbage text line reader class in combination with regular expressions acting on a `CharSequence` buffer, and which match some simple command language syntax. Consequently a child worker process can be monitored by a supevisor in an infinitely running 24/7 manner and yet generate virtually no heap garbage - a desirable characteristic.
 
-An object serialization abstraction layer could further be devised on top of this API, though, if one preferred to work with Java objects instead. 
+An object serialization abstraction layer could further be devised on top of this API, though, if one preferred to work with Java objects instead.
 
 ## Conclusion
 
