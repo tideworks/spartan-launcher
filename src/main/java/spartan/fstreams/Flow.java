@@ -24,8 +24,10 @@ import spartan.Spartan.InvokeResponseEx;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -41,7 +43,8 @@ public final class Flow {
   private final ExecutorService executorService;
   private final ExecutorCompletionService<Integer> exec;
   private final List<Entry<Integer, Callable<Integer>>> taskList = new ArrayList<>();
-  private final List<Integer> pids = new ArrayList<>();
+  @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
+  private final Set<Integer> pids = new LinkedHashSet<>(); // currently not made use of - for future use
   private final BiConsumer<InputStream, Subscription> noopAction = (os, sc) -> {};
   private boolean subscribeDisabled = false;
 
@@ -157,9 +160,6 @@ public final class Flow {
     return new Flow(executorService).makeSubscriber(rsp);
   }
 
-  @SuppressWarnings({"unchecked", "UnusedReturnValue"})
-  private static <T extends Exception, R> R uncheckedExceptionThrow(Exception t) throws T { throw (T) t; }
-
   private Subscriber makeSubscriber(final InvokeResponseEx rsp) {
     return new Subscriber() {
       private BiConsumer<InputStream, Subscription> onErrorAction = noopAction;
@@ -168,19 +168,10 @@ public final class Flow {
         @Override
         public void cancel() throws Exception {
           // use Spartan API to kill child process via its pid
-          Exception ex = null;
-          for (final Integer pid : pids) {
-            try {
-              Spartan.killSIGTERM(pid);
-            } catch (Spartan.KillProcessException e) {
-              if (ex != null) {
-                e.addSuppressed(ex);
-              }
-              ex = e;
-            }
-          }
-          if (ex != null) {
-            uncheckedExceptionThrow(ex);
+          try {
+            Spartan.killSIGTERM(rsp.childPID);
+          } catch (Throwable e) {
+            throw new Exception(String.format("error on signaling child process %d to terminate", rsp.childPID), e);
           }
         }
         @Override
