@@ -57,7 +57,7 @@ A **spartan**-based Java program will respond to two sub commands without a prog
 
 The method implementing `status` sub command can be easily overridden and customized (to display more in-depth status info).
 
-A **spartan**-launched program can also be terminated via Control-C (Posix SIGINT signal).
+A **spartan**-launched program can also be terminated with Control-C (Posix SIGINT signal).
 
 Additionally **spartan** annotations can be applied to methods that are designated as entry points for programmer-defined custom sub commands.
 
@@ -69,7 +69,7 @@ The **spartan** service daemon runs in a process context referred to as the *sup
 
 A sub command can therefore be issued to invoke a worker child process from the command line (in addition to supervisor-specific sub commands already mentioned).
 
-The **spartan** annotations for supervisor sub commands and worker child process sub commands will specify the sub command text token as an annotation attribute. That token is what is typed at the command line in order to execute it - along with any command line arguments that are passed to the sub command. Consequently **spartan**-based services are very easy to script via Linux shell programs such as `bash`.
+The **spartan** annotations for supervisor sub commands and worker child process sub commands will specify the sub command text token as an annotation attribute. That token is what is typed at the command line in order to execute it - along with any command line arguments that are passed to the sub command. Consequently **spartan**-based services are very easy to script with Linux shell programs such as `bash`.
 
 A supervisor process can oversee the execution of one or more worker child processes - it can *supervise* them, so to speak. This is a great way to go about programming robust, self-healing software.
 
@@ -105,13 +105,13 @@ A custom implemented watchdog is the ideal because it can provide the smartest s
 
 ### `process forking` - the easiest and best way to implement a watchdog
 
-When programming in C or C++ (or some of the new languages such as Rust) on a Posix OS, it is possible to use the `fork` system call to spawn a child process from a parent process. This is a highly convenient mechanism for concurrent programming via processes because one can easily write the logic of the parent process and the child process(es) to reside all in single program, where said program is one executable image.
+When programming in C or C++ (or some of the new languages such as Rust) on a Posix OS, it is possible to use the `fork` system call to spawn a child process from a parent process. This is a highly convenient mechanism for concurrent programming using processes because one can easily write the logic of the parent process and the child process(es) to reside all in single program, where said program is one executable image.
 
 A single program using process forking will start out executing as the parent watchdog process. After making the `fork` call, it will then continue executing as the parent process along one code pathway, and then as the child process along another code pathway. It is easy to thus share the programming use of the same data structures and functions between parent and child processes.
 
 The marshaling of data between parent and child processes will be guaranteed to be version compatible (the exact same data structures are seen identically by both) so there is no need to worry with version checks in parent-child inter-process communication.
 
-The child process inherits and executes with the same permissions as the parent process so it can automatically access all the same files and directories that the parent can access. By the same token, the child is likewise prohibited from unwarranted resource access just as the parent. Hence the security posture is simple and straightforward - the child process can be regarded in the same manner, security-wise, as the parent process. Because of this inheriting of user identity and permissions, it is not necessary to provide authentication credentials when initiating the child process via a `fork` call.
+The child process inherits and executes with the same permissions as the parent process so it can automatically access all the same files and directories that the parent can access. By the same token, the child is likewise prohibited from unwarranted resource access just as the parent. Hence the security posture is simple and straightforward - the child process can be regarded in the same manner, security-wise, as the parent process. Because of this inheriting of user identity and permissions, it is not necessary to provide authentication credentials when initiating the child process through a `fork` call.
 
 Well, that is all nice and wonderful for C, C++, or Rust programmers, but what does that have to do with Java programming?
 
@@ -121,7 +121,7 @@ Yes, Java already has APIs for launching other processes - but at a cost relativ
 
 ## what `spartan` brings to the table
 
-A java program launched via **spartan** has these capabilities and characteristics:
+A java program launched by **spartan** has these capabilities and characteristics:
 
 - is intended for implementing services - invoking `main(...)` initiates the program to run as a service daemon
 - the service runs as the *supervisor* process
@@ -145,7 +145,7 @@ A java program launched via **spartan** has these capabilities and characteristi
     - supervisor sub command entry points
     - worker child process sub command entry points
 - spartan has the requirement that the owning class of the `main` method entry point be derived from `spartan.SpartanBase`
-- the program name (as used to launch the service) is available to the supervisor `main` method entry point thread in `spartan.SpartanBase.programName` static field and via its `getProgramName()` static getter method
+- the program name (as used to launch the service) is available to the supervisor `main` method entry point thread in `spartan.SpartanBase.programName` static field and by its `getProgramName()` static getter method
 - the class `spartan.SpartanSysLogAppender` is derived from `ch.qos.logback.core.OutputStreamAppender<ILoggingEvent>` and enables Java code to use this logback appender to log *error* and *fatal* messages directly to the Linux syslog (no TCP port is involved - spartan directly calls Linux API for syslogging)
 - the spartan convention is to use a symbolic link (having the desired program name) reference the `spartan` program launcher executable
     - spartan will look for a `config.ini` file in the same directory as the symbolic link
@@ -179,7 +179,7 @@ The token name of the sub command is provided as a text string argument to the a
 
 A supervisor sub command executes in the context of the supervisor process.
 
-Code which is already executing in the supervisor process should not invoke supervisor sub commands via the **spartan** `invokeCommand` API - it should instead directly call the method. These supervisor sub commands are intended to be invoked from an external source such as from a `bash` command line shell.
+Code which is already executing in the supervisor process should not invoke supervisor sub commands with the **spartan** `invokeCommand` API - it should instead directly call the method. These supervisor sub commands are intended to be invoked from an external source such as from a `bash` command line shell.
 
 The first entry of the `args` array will be the name of the sub command that was invoked.
 
@@ -204,7 +204,7 @@ The first entry of the `args` array will be the name of the sub command that was
 
 The `PrintStream` argument is used to write output back to the invoker of the command.
 
-A worker child process sub command can be invoked from the supervisor process via a **spartan** `invokeCommand` API; or they can be invoked from, say, a `bash` command line shell.
+A worker child process sub command can be invoked from the supervisor process utilizing **spartan** `invokeCommand` API; or they can be invoked from, say, a `bash` command line shell.
 
 ### some spartan APIs and class data structures
 
@@ -282,7 +282,7 @@ It is very easy to now do Java programming which makes use of spawned child proc
 
 ### Requirements for building `spartan`:
 
-**Spartan** has been built and tested on RedHat/Centos distros of 6.7 and 7.4 (and Fedora 26, 27 as well as Ubuntu 14.04.5 - when Docker containerized, Spartan-based programs have run on CentOS 6.1 distro!) Spartan consist of both Java and C++11 source code. It is built via the Java build tool, Maven. A Maven plugin is used to invoke `cmake`, which in turn compiles and links the C++ source code using GNU g++ compiler. Here are build provisioning prerequisites:
+**Spartan** has been built and tested on RedHat/Centos distros of 6.7 and 7.4 (and Fedora 26, 27 as well as Ubuntu 14.04.5 - when Docker containerized, Spartan-based programs have run on CentOS 6.1 distro!) Spartan consist of both Java and C++11 source code. It is built through the Java build tool, Maven. A Maven plugin is used to invoke `cmake`, which in turn compiles and links the C++ source code using GNU g++ compiler. Here are build provisioning prerequisites:
 
 - **Java SDK 1.8.0**
 - **Maven 3.x.x**
@@ -651,7 +651,7 @@ Multiple child worker subprocesses can be invoked and then their respective subs
   }
 ```
 
-Or the subscribers could be chained via loop iteration - here we see subscribers established for a list of input files (where each input file is passed to a child worker process via `invokeCommandEx(...)`):
+Or the subscribers could be chained via loop iteration - here we see subscribers established for a list of input files (where each input file is passed to a child worker process by `invokeCommandEx(...)`):
 
 ```java
   final Set<Integer> childPIDs = new HashSet<>();
@@ -695,7 +695,7 @@ Or the subscribers could be chained via loop iteration - here we see subscribers
   // childPIDs.size() == 0 should now be true
 ```
 
-Notice that in the first iteration pass through the loop the subscriber is established via the static method `Flow.subscribe(...)` call and then thereafter via the instance method `subscribe(...)` call.
+Notice that in the first iteration pass through the loop the subscriber is established using the static method `Flow.subscribe(...)` call and then thereafter with the instance method `subscribe(...)` call.
 
 Use of the new `Flow` interfaces are illustrated in the `spartan-react-ex` and `spartan-cfg-ex` example programs.
 
@@ -716,6 +716,6 @@ An object serialization abstraction layer could further be devised on top of thi
 
 ## Conclusion
 
-In other programming languages what **spartan** empowers would perhaps not be very special. Concurrent programming via processes is a rather ancient practice in computing. All manner of stalwart programs that run as services on Linux, like PostreSQL, MySQL, Redis (many others) - and desktop applications such as Chrome browser and lately the Firefox brower - utilize multi-process concurrent programming as core to how they are designed and operate.
+In other programming languages what **spartan** empowers would perhaps not be very special. Concurrent programming using processes is a rather ancient practice in computing. All manner of stalwart programs that run as services on Linux, like PostgreSQL, MySQL, Redis (many others) - and desktop applications such as Chrome browser and lately the Firefox brower - utilize multi-process concurrent programming as core to how they are designed and operate.
 
 However, for the Java language, where this manner of programming now becomes so facile, its very much like a new landscape of program architecture is presenting itself. Enjoy.
