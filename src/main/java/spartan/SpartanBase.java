@@ -23,11 +23,13 @@ import static java.util.Comparator.comparing;
 import static java.util.stream.Collectors.toList;
 import static spartan.Spartan.killProcessGroupSIGINT;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStream;
 import java.io.PrintStream;
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
-import java.util.Collection;
-import java.util.HashSet;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
@@ -35,9 +37,6 @@ import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.Supplier;
-import java.util.List;
-import java.util.Optional;
-import java.util.Set;
 import java.util.stream.Stream;
 
 @SuppressWarnings({"WeakerAccess", "unused"})
@@ -337,5 +336,131 @@ public class SpartanBase implements Spartan {
         rsp.close();
       }
     }
+  }
+
+  /**
+   * Diagnostic helper method that prints debug info for a called command method.
+   * The info is only printed when Spartan verbosity level is set to no less than
+   * DEBUG. Also, the info is printed to the stderr of the supervisor process, or
+   * the stderr of the service.
+   *
+   * @param clsName owning class of the command method that was called
+   * @param methodName name of the command method that was called
+   * @param args arguments that were passed to the invoked method
+   */
+  protected static void print_method_call_info(String clsName, String methodName, String[] args) {
+    if (loggingLevel >= LL_DEBUG) {
+      log(LL_DEBUG, () -> {
+        final String output = String.join("\" \"", args);
+        return String.format(">> invoked %s.%s(\\\"%s\\\")", clsName, methodName, output);
+      });
+    }
+  }
+
+  private static void closeStream(Closeable ioStream, String desc) {
+    if (ioStream != null) {
+      try {
+        ioStream.close();
+      } catch (IOException e) {
+        final String errmsg = String.format("exception on closing pipe %s:", desc);
+        log(LL_ERR, errmsg::toString);
+        e.printStackTrace(System.err);
+      }
+    }
+  }
+
+  /**
+   * A callable supervisor command does not return any result.
+   */
+  @FunctionalInterface
+  protected interface CallableSupervisorCommand {
+    void call(String cmd, String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) throws
+          Exception;
+  }
+
+  /**
+   * Helper method that does the outermost boilerplate handling for
+   * supervisor commands - the user method to be executed to implement
+   * the command is passed as the right-most lambda argument.
+   * <p>
+   * <b>NOTE:</b> This helper method will be responsible for closing
+   * the stream arguments - the called callable does not have to close
+   * them.
+   *
+   * @param args supervisor command arguments (first element is name of the command)
+   * @param outStream output stream to write processing data/info to
+   * @param errStream error output stream to write errors, health-check-info, out-of-band protocol
+   * @param inStream an input stream for receiving data from the invoker
+   * @param callable the user-supplied callable which implements the command
+   */
+  protected static void commandForwarder(String[] args, PrintStream outStream, PrintStream errStream,
+                                         InputStream inStream, CallableSupervisorCommand callable)
+  {
+    try {
+      assert args.length > 0;
+      final String cmd = args[0];
+      final String[] remainingArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+
+      callable.call(cmd, remainingArgs, outStream, errStream, inStream);
+
+    } catch(Throwable e) {
+      errStream.printf("%nERROR: %s: exception thrown:%n", args.length > 0 ? args[0] : "{invalid command}");
+      e.printStackTrace(errStream);
+    } finally {
+      closeStream(outStream, "output stream");
+      closeStream(errStream, "error output stream");
+      closeStream(inStream, "input stream");
+    }
+  }
+
+  /**
+   * A callable worker child process command must return a status code
+   * result where 0 indicates success and 1 indicates failure.
+   */
+  @FunctionalInterface
+  protected interface CallableWorkerCommand {
+    int call(String cmd, String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) throws
+          Exception;
+  }
+
+  /**
+   * Helper method that does the outermost boilerplate handling for
+   * worker child commands - the user method to be executed to implement
+   * the command is passed as the right-most lambda argument.
+   * <p>
+   * <b>NOTE:</b> This helper method will be responsible for closing
+   * the stream arguments - the called callable does not have to close
+   * them.
+   *
+   * @param args worker child process command arguments (first element is name of the command)
+   * @param outStream worker's output stream to write processing data/info to
+   * @param errStream worker's error output stream to write errors, health-check-info, out-of-band protocol
+   * @param inStream an input stream for the worker to receive data from the invoker
+   * @param callable the user-supplied callable which implements the command
+   */
+  protected static void commandForwarder(String[] args, PrintStream outStream, PrintStream errStream,
+                                         InputStream inStream, CallableWorkerCommand callable)
+  {
+    @SuppressWarnings("UnusedAssignment")
+    int status_code = 0;
+
+    try {
+      assert args.length > 0;
+      final String cmd = args[0];
+      final String[] remainingArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+
+      status_code = callable.call(cmd, remainingArgs, outStream, errStream, inStream);
+
+    } catch(Throwable e) {
+      errStream.printf("%nERROR: %s: exception thrown:%n", args.length > 0 ? args[0] : "{invalid command}");
+      e.printStackTrace(errStream);
+      status_code = 1;
+    } finally {
+      closeStream(outStream, "output stream");
+      closeStream(errStream, "error output stream");
+      closeStream(inStream, "input stream");
+    }
+
+    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
   }
 }
