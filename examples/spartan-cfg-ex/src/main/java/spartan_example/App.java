@@ -66,7 +66,6 @@ public class App extends SpartanBase {
   private static final int BUF_SIZE = 0x4000;
   private static Path programDirPath;
   private static CommandLineArgs s_args;
-  private final ExecutorService taskExecutor;
 
   @Parameters(separators="= ")
   private static final class CommandLineArgs implements Serializable {
@@ -104,20 +103,20 @@ public class App extends SpartanBase {
 
     @Parameter(names="-poll", description="use to specify the CDC polling interval (in seconds)")
     long pollingInterval = 10;
-/*
-    @Parameter(names="-src", description="source (transactional) database connection string",
-            converter=ParseSrcDBConnection.class)
-    OptionsResult srcDb = OptionsResult.none;
+    /*
+        @Parameter(names="-src", description="source (transactional) database connection string",
+                converter=ParseSrcDBConnection.class)
+        OptionsResult srcDb = OptionsResult.none;
 
-    @Parameter(names="-dst", description="destination (query) database connection string",
-        converter=ParseDstDBConnection.class)
-    OptionsResult dstDb = OptionsResult.none;
+        @Parameter(names="-dst", description="destination (query) database connection string",
+            converter=ParseDstDBConnection.class)
+        OptionsResult dstDb = OptionsResult.none;
 
-    @Parameter(names="-src-schema",
-            description="file path to a .yml config file which list tables and their columns",
-            converter=ParseConfigurationFilePath.class)
-    OptionsResult srcSchemaCfgFilePath = OptionsResult.none;
-*/
+        @Parameter(names="-src-schema",
+                description="file path to a .yml config file which list tables and their columns",
+                converter=ParseConfigurationFilePath.class)
+        OptionsResult srcSchemaCfgFilePath = OptionsResult.none;
+    */
     @Parameter(names="-outputdir", description="list of one or more output folders - separated by ':' or ';'")
     String outputdir = ".";
 
@@ -125,7 +124,7 @@ public class App extends SpartanBase {
     String setdir = "";
 
     @Parameter(names= { "-cnt", "--continueExtraction" },
-            description="When extracting from log files, continue where left off (default is true)", arity = 1)
+          description="When extracting from log files, continue where left off (default is true)", arity = 1)
     boolean isContinueExtraction = true;
 
     @Parameter(hidden=true)
@@ -155,23 +154,25 @@ public class App extends SpartanBase {
     @Override
     public String toString() {
       return "CommandLineArgs{" +
-                     "programName='" + programName + '\'' +
-                     ", help=" + help +
-                     ", isInfoLevel=" + isInfoLevel +
-                     ", isDebugLevel=" + isDebugLevel +
-                     ", isTraceLevel=" + isTraceLevel +
-                     ", isChildWorker=" + isChildWorker +
-                     ", isGenesisChildWorker=" + isGenesisChildWorker +
-                     ", isCdcChildWorker=" + isCdcChildWorker +
-                     ", dumpChangeData=" + dumpChangeData +
-                     ", pollingInterval=" + pollingInterval +
-                     ", outputdir='" + outputdir + '\'' +
-                     ", setdir='" + setdir + '\'' +
-                     ", isContinueExtraction=" + isContinueExtraction +
-                     ", unknowns=" + unknowns +
-                     '}';
+                   "programName='" + programName + '\'' +
+                   ", help=" + help +
+                   ", isInfoLevel=" + isInfoLevel +
+                   ", isDebugLevel=" + isDebugLevel +
+                   ", isTraceLevel=" + isTraceLevel +
+                   ", isChildWorker=" + isChildWorker +
+                   ", isGenesisChildWorker=" + isGenesisChildWorker +
+                   ", isCdcChildWorker=" + isCdcChildWorker +
+                   ", dumpChangeData=" + dumpChangeData +
+                   ", pollingInterval=" + pollingInterval +
+                   ", outputdir='" + outputdir + '\'' +
+                   ", setdir='" + setdir + '\'' +
+                   ", isContinueExtraction=" + isContinueExtraction +
+                   ", unknowns=" + unknowns +
+                   '}';
     }
   }
+
+  private final ExecutorService taskExecutor;
 
   // watchdog service instance initialization (will run as a singleton object managed by Spartan runtime)
   {
@@ -469,18 +470,6 @@ public class App extends SpartanBase {
   }
 
   /**
-   * Diagnostic helper method that prints debug info for a called command method.
-   *
-   * @param rspStream output stream to print info to
-   * @param methodName name of the command method that was called
-   * @param args arguments that were passed to the invoked method
-   */
-  private static void print_method_call_info(PrintStream rspStream, String methodName, String[] args) {
-    final String stringizedArgs = String.join("\" \"", args);
-    rspStream.printf(">> %s.%s(\"%s\")%n", clsName, methodName, stringizedArgs);
-  }
-
-  /**
    * Example Spartan child worker entry-point method.
    * (Does a simulated processing activity.)
    * <p>
@@ -501,41 +490,35 @@ public class App extends SpartanBase {
    * @param inStream stream from receiving input from invoker
    */
   @ChildWorkerCommand(cmd="GENETL", jvmArgs={"-Xms48m", "-Xmx128m"})
-  public static void doGenesisEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "doGenesisEtlProcessing";
-    assert args.length > 0;
+  public static void doGenesisEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream,
+                                            InputStream inStream)
+  {
+    print_method_call_info(errStream, clsName, "doGenesisEtlProcessing", args);
+    commandForwarder(args, outStream, errStream, inStream, App::doCoreGenesisEtlProcessing);
+  }
 
-    final String cmd = args[0];
-
-    int status_code = 0;
-
-    try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
-      print_method_call_info(outS, methodName, args);
-
-      // initialize singleton object state that will hold application configuration settings
-      // (either streamed in from parent process or is loaded from properties file)
-      if (Arrays.stream(args).noneMatch("-ignore-cfg"::equalsIgnoreCase)) {
-        s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
-              jcmdr -> jcmdr.parse(String.join("=", genesisChildWorkerOptn, Boolean.TRUE.toString())));
-      } else {
-        // facilitates calling sub-command from command line shell (for testing purposes)
-        s_args = new CommandLineArgs(clsName);    // SpartanBase.programName not set so using simple class name
-        initializeCommandLineArgs(s_args, args);  // load config settings from properties file and command line args
-      }
-      errS.println(s_args); // dump toString() output to error stream; TODO: should comment out in real program
-
-
-      /*### call a method here to do the real work of the worker child process sub-command ###*/
-      spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
-
-
-    } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
-      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
-      e.printStackTrace(errStream);
-      status_code = 1;
+  private static int doCoreGenesisEtlProcessing(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                                InputStream inStream) throws Exception
+  {
+    // initialize singleton object state that will hold application configuration settings
+    // (either streamed in from parent process or is loaded from properties file)
+    if (Arrays.stream(args).noneMatch("-ignore-cfg"::equalsIgnoreCase)) {
+      s_args = childWorkerInitialization(inStream, args,
+            jcmdr -> jcmdr.parse(String.join("=", genesisChildWorkerOptn, Boolean.TRUE.toString())));
+    } else {
+      // facilitates calling sub-command from command line shell (for testing purposes)
+      s_args = new CommandLineArgs(clsName);    // SpartanBase.programName not set so using simple class name
+      initializeCommandLineArgs(s_args, args);  // load config settings from properties file and command line args
     }
+    errStream.println(s_args); // dump toString() output to error stream; TODO: should comment out in real program
 
-    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
+
+    /*### call a method here to do the real work of the worker child process sub-command ###*/
+    print_method_call_info(errStream, "spartan.test", "invokeGenerateDummyTestOutput", args);
+    spartan.test.invokeGenerateDummyTestOutput(cmd, args, outStream, errStream);
+
+
+    return 0; // worker child process should return a meaningful status code indicating success/failure
   }
 
   /**
@@ -563,78 +546,83 @@ public class App extends SpartanBase {
    * @param inStream stream from receiving input from invoker
    */
   @ChildWorkerCommand(cmd="CDCETL", jvmArgs={"-Xms48m", "-Xmx128m"})
-  public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "doCdcEtlProcessing";
-    assert args.length > 0;
+  public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream,
+                                        InputStream inStream)
+  {
+    print_method_call_info(errStream, clsName, "doCdcEtlProcessing", args);
+    commandForwarder(args, outStream, errStream, inStream, App::doCoreCdcEtlProcessing);
+  }
 
-    final String cmd = args[0];
+  private static int doCoreCdcEtlProcessing(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                            InputStream inStream) throws Exception
+  {
 
     int status_code = 0;
 
-    try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
-      print_method_call_info(errS, methodName, args);
+    // initialize singleton object state that will hold application configuration settings
+    // (either streamed in from parent process or is loaded from properties file)
+    if (Arrays.stream(args).noneMatch("-ignore-cfg"::equalsIgnoreCase)) {
+      s_args = childWorkerInitialization(inStream, args,
+            jcmdr -> jcmdr.parse(String.join("=", cdcChildWorkerOptn, Boolean.TRUE.toString())));
+    } else {
+      // facilitates calling sub-command from command line shell (for testing purposes)
+      s_args = new CommandLineArgs(clsName);    // SpartanBase.programName not set so using simple class name
+      initializeCommandLineArgs(s_args, args);  // load config settings from properties file and command line args
+    }
+    errStream.println(s_args); // dump toString() output to error stream; TODO: should comment out in real program
 
-      // initialize singleton object state that will hold application configuration settings
-      // (either streamed in from parent process or is loaded from properties file)
-      if (Arrays.stream(args).noneMatch("-ignore-cfg"::equalsIgnoreCase)) {
-        s_args = childWorkerInitialization(inS, Arrays.copyOfRange(args, 1, args.length),
-              jcmdr -> jcmdr.parse(String.join("=", cdcChildWorkerOptn, Boolean.TRUE.toString())));
-      } else {
-        // facilitates calling sub-command from command line shell (for testing purposes)
-        s_args = new CommandLineArgs(clsName);    // SpartanBase.programName not set so using simple class name
-        initializeCommandLineArgs(s_args, args);  // load config settings from properties file and command line args
-      }
-      errS.println(s_args); // dump toString() output to error stream; TODO: should comment out in real program
+    final String pidFileBaseName = String.join("-", s_args.programName, cmd).toLowerCase();
 
-      final String pidFileBaseName = String.join("-", s_args.programName, cmd).toLowerCase();
+    if (Spartan.isFirstInstance(pidFileBaseName)) {
 
-      if (Spartan.isFirstInstance(pidFileBaseName)) {
-
-        final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-        scheduler.scheduleAtFixedRate(() -> errS.print(resetBackoffToken), 3, 3, TimeUnit.SECONDS);
+      final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
+      scheduler.scheduleAtFixedRate(() -> errStream.print(resetBackoffToken), 3, 3, TimeUnit.SECONDS);
 
 
-        /*### call a method here to do the real work of the worker child process sub-command ###*/
-        spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
+      /*### call a method here to do the real work of the worker child process sub-command ###*/
+      print_method_call_info(errStream, "spartan.test", "invokeGenerateDummyTestOutput", args);
+      spartan.test.invokeGenerateDummyTestOutput(cmd, args, outStream, errStream);
 
 
-      } else {
-        final String errmsg = format("Child command %s is already running", cmd);
-        errS.printf("WARNING: %s%n", errmsg);
-        log(LL_WARN, errmsg::toString);
-        status_code = 1;
-      }
-    } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
-      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
-      e.printStackTrace(errStream);
+    } else {
+      final String errmsg = format("Child command %s is already running", cmd);
+      errStream.printf("WARNING: %s%n", errmsg);
+      log(LL_WARN, errmsg::toString);
       status_code = 1;
     }
 
-    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
+    return status_code; // worker child process should return a meaningful status code indicating success/failure
   }
 
   @SupervisorCommand("INVOKECHILDCMD")
   public void invokeChildCmd(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "invokeChildCmd";
-    try {
-      assert args.length > 0;
-      print_method_call_info(outStream, methodName, args);
-      final String cmd = args[0];
+    print_method_call_info(outStream, clsName, "invokeChildCmd", args);
+    commandForwarderNoStreamClose(args, outStream, errStream, inStream, this::coreInvokeChildCmd);
+  }
 
-      if (args.length < 2) {
+  private void coreInvokeChildCmd(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                  InputStream inStream)
+  {
+    try {
+      if (args.length < 1) {
         errStream.println("ERROR: no child command specified - insufficient command line arguments");
         return;
       }
-      if (cmd.equalsIgnoreCase(args[1])) {
-        errStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", args[1]);
+
+      final String childSubCmd = args[0];
+
+      if (cmd.equalsIgnoreCase(childSubCmd)) {
+        errStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", childSubCmd);
         return;
       }
 
-      final String childSubCmd = args[1];
+      final PrintStream taskOutS = outStream; // the async task will take ownership of the output stream
+      final PrintStream taskErrS = errStream; // the async task will take ownership of the error output stream
+      final InputStream taskInS  = inStream;  // the async task will take ownership of the error output stream
 
       final Runnable detachedTask = () -> {
-        try (final PrintStream outS = outStream; final PrintStream errS = errStream; final InputStream inS = inStream) {
-          final InvokeResponseEx rsp = Spartan.invokeCommandEx(Arrays.copyOfRange(args, 1, args.length));
+        try (final PrintStream outS = taskOutS; final PrintStream errS = taskErrS; final InputStream inS = taskInS) {
+          final InvokeResponseEx rsp = Spartan.invokeCommandEx(args);
           _pids.add(rsp.childPID);
 
           // send the service's serialized configuration to the spawned child process
@@ -663,18 +651,24 @@ public class App extends SpartanBase {
             }
           }
         } catch (InterruptedException e) {
-          errStream.printf("%nWARN: %s: interruption occurred - processing may not be completed!%n", childSubCmd);
+          taskErrS.printf("%nWARN: %s: interruption occurred - processing may not be completed!%n", childSubCmd);
         } catch (Throwable e) {
-          errStream.printf("%nERROR: %s: exception thrown:%n", childSubCmd);
-          e.printStackTrace(errStream);
+          taskErrS.printf("%nERROR: %s: exception thrown:%n", childSubCmd);
+          e.printStackTrace(taskErrS);
         }
       };
 
       taskExecutor.submit(detachedTask); // invoked worker child process will be managed by a supervisor detached task
 
-    } catch (Throwable e) {
-      errStream.printf("%nERROR: %s: exception thrown:%n", (args.length > 0 ? args[0] : "{invalid command}"));
-      e.printStackTrace(errStream);
+      // null them out so that the outer try-finally block no longer will close them
+      outStream = null;
+      inStream = null;
+      errStream = null;
+
+    } finally {
+      closeStream(outStream, "output stream");
+      closeStream(errStream, "error output stream");
+      closeStream(inStream, "input stream");
     }
   }
 
