@@ -357,7 +357,18 @@ public class SpartanBase implements Spartan {
     }
   }
 
-  private static void closeStream(Closeable ioStream, String desc) {
+  /**
+   * Helper method for closing {@link java.io} stream objects. If
+   * calling {@link Closeable#close()} throws an exception, it is
+   * caught and logged to {@link System#err}, so is intended to be
+   * used in the outermost code prior to returning from a sub-command
+   * and to where the stream arguments can't be assumed to be in a
+   * valid state for use.
+   *
+   * @param ioStream the {@link java.io} stream object to be closed
+   * @param desc descriptive text that will be included in error logging
+   */
+  public static void closeStream(Closeable ioStream, String desc) {
     if (ioStream != null) {
       try {
         ioStream.close();
