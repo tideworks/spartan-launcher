@@ -348,7 +348,7 @@ public class SpartanBase implements Spartan {
    * @param methodName name of the command method that was called
    * @param args arguments that were passed to the invoked method
    */
-  protected static void print_method_call_info(String clsName, String methodName, String[] args) {
+  public static void print_method_call_info(String clsName, String methodName, String[] args) {
     if (loggingLevel >= LL_DEBUG) {
       log(LL_DEBUG, () -> {
         final String output = String.join("\" \"", args);
@@ -364,6 +364,9 @@ public class SpartanBase implements Spartan {
    * used in the outermost code prior to returning from a sub-command
    * and to where the stream arguments can't be assumed to be in a
    * valid state for use.
+   * <p>
+   * <b>NOTE:</b> It is safe to pass a null reference to this method,
+   * will detect and return, doing nothing.
    *
    * @param ioStream the {@link java.io} stream object to be closed
    * @param desc descriptive text that will be included in error logging
