@@ -148,18 +148,6 @@ public class App extends SpartanBase {
   }
 
   /**
-   * Diagnostic helper method that prints debug info for a called command method.
-   *
-   * @param rspStream output stream to print info to
-   * @param methodName name of the command method that was called
-   * @param args arguments that were passed to the invoked method
-   */
-  private static void print_method_call_info(PrintStream rspStream, String methodName, String[] args) {
-    final String output = String.join("\" \"", args);
-    rspStream.printf("invoked %s.%s(\"%s\")%n", clsName, methodName, output);
-  }
-
-  /**
    * An example <i>supervisor</i> sub-command entry-point method. This method will
    * be invoked on a thread running in the <i>supervisor</i> Java JVM process.
    * <p>
@@ -178,10 +166,9 @@ public class App extends SpartanBase {
    */
   @SupervisorCommand("GENFIB")
   public void generateFibonacciSequence(String[] args, PrintStream rspStream) {
-    final String methodName = "generateFibonacciSequence";
+    print_method_call_info(clsName, "generateFibonacciSequence", args);
 
     try (final PrintStream rsp = rspStream) {
-      print_method_call_info(rsp, methodName, args);
       assert args.length > 0;
 
       final double maxCeiling = args.length > 1 ? Double.parseDouble(args[1]) : 30 /* default */;
@@ -251,21 +238,23 @@ public class App extends SpartanBase {
    */
   @SupervisorCommand("INVOKECHILDCMD")
   public void invokeChildCmd(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "invokeChildCmd";
-    try (final InputStream inS = inStream) {
-      assert args.length > 0;
-      print_method_call_info(outStream, methodName, args);
-      final String cmd = args[0];
+    print_method_call_info(clsName, "invokeChildCmd", args);
+    commandForwarderNoStreamClose(args, outStream, errStream, inStream, this::coreInvokeChildCmd);
+  }
 
+  private void coreInvokeChildCmd(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                  InputStream inStream)
+  {
+    try {
       if (args.length < 2) {
-        outStream.println("ERROR: no child command specified - insufficient command line arguments");
+        errStream.println("ERROR: no child command specified - insufficient command line arguments");
         return;
       }
 
       final String child_cmd = args[1];
 
       if (cmd.equalsIgnoreCase(child_cmd)) {
-        outStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", child_cmd);
+        errStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", child_cmd);
         return;
       }
 
@@ -275,6 +264,7 @@ public class App extends SpartanBase {
 
       final PrintStream taskOutS = outStream; // the async task will take ownership of the output stream
       outStream = null; // null it out so that the outer try-finally block no longer will close it
+      final PrintStream taskErrS = errStream; // the async task will take ownership of the error output stream
 
       // Asynchronously consumes output from the invoked sub-command process and writes it to the response stream
       final Runnable detachedTask = () -> {
@@ -293,7 +283,7 @@ public class App extends SpartanBase {
              final InputStream childErrS = rsp.errStream;
              final OutputStream childInS = rsp.childInputStream;
              final PrintStream outS = taskOutS;
-             final PrintStream errS = errStream)
+             final PrintStream errS = taskErrS)
         {
           // this is an example implementation and all that we do here
           // is write the child process output to the original invoker
@@ -310,27 +300,24 @@ public class App extends SpartanBase {
         } catch (Throwable e) {
           final String err = format("exception thrown so exiting thread: %s%n%s", Thread.currentThread().getName(), e);
           log(LL_ERR, err::toString); // logs the error message to the service's stderr
-          errStream.printf("%nERROR: %s: %s%n", cmd, err); // write's to the invoker's stderr
+          taskErrS.printf("%nERROR: %s: %s%n", cmd, err); // write's to the invoker's stderr
         }
       };
 
       workerExecutor.submit(detachedTask); // invoked worker child process will be managed by a supervisor detached task
 
+      errStream = null; // can safely assume that this is solely owned by the detached task now, so null it out
+
     } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
       // if we got here then we never got into task execution so go
-      // ahead and use and close error output stream to the invoker,
+      // ahead and log to error output stream back to the invoker,
       // (otherwise is assumed the task now owns and will close it)
       errStream.printf("%nERROR: %s: exception thrown:%n", (args.length > 0 ? args[0] : "{invalid command}"));
       e.printStackTrace(errStream);
-      try {
-        errStream.close();
-      } catch (Exception ignore) {}
     } finally {
-      if (outStream != null) {
-        try {
-          outStream.close();
-        } catch (Exception ignore) {}
-      }
+      closeStream(outStream, "output stream");
+      closeStream(errStream, "error output stream");
+      closeStream(inStream, "input stream");
     }
   }
 
@@ -355,32 +342,20 @@ public class App extends SpartanBase {
    * @param inStream stream from receiving input from invoker
    */
   @ChildWorkerCommand(cmd="GENETL", jvmArgs={"-Xms48m", "-Xmx128m"})
-  public static void doGenesisEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "doGenesisEtlProcessing";
-    assert args.length > 0;
+  public static void doGenesisEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream,
+                                            InputStream inStream)
+  {
+    print_method_call_info(clsName, "doGenesisEtlProcessing", args);
+    commandForwarder(args, outStream, errStream, inStream, App::doCoreGenesisEtlProcessing);
+  }
 
-    final String cmd = args[0];
+  private static int doCoreGenesisEtlProcessing(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                                InputStream inStream)
+  {
+    /*### do the real work of the worker child process sub-command here ###*/
+    spartan.test.invokeGenerateDummyTestOutput(cmd, args, outStream, errStream);
 
-    int status_code = 0;
-
-    try (final PrintStream outS = outStream;
-         final PrintStream errS = errStream;
-         final InputStream inS = inStream)
-    {
-      print_method_call_info(outS, methodName, args);
-
-
-      /*### call a method here to do the real work of the worker child process sub-command ###*/
-      spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
-
-
-    } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
-      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
-      e.printStackTrace(errStream);
-      status_code = 1;
-    }
-
-    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
+    return 0; // worker child process should return a meaningful status code indicating success/failure
   }
 
   /**
@@ -408,41 +383,32 @@ public class App extends SpartanBase {
    * @param inStream stream from receiving input from invoker
    */
   @ChildWorkerCommand(cmd="CDCETL", jvmArgs={"-Xms48m", "-Xmx128m"})
-  public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "doCdcEtlProcessing";
-    assert args.length > 0;
+  public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream,
+                                        InputStream inStream)
+  {
+    print_method_call_info(clsName, "doCdcEtlProcessing", args);
+    commandForwarder(args, outStream, errStream, inStream, App::doCoreCdcEtlProcessing);
+  }
 
-    final String cmd = args[0];
+  private static int doCoreCdcEtlProcessing(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                            InputStream inStream)
+  {
+    int status_code = 0; // zero indicates successful completion
 
-    int status_code = 0;
+    final String pidFileBaseName = String.join("-", "spartan-ex", cmd).toLowerCase();
 
-    try (final PrintStream outS = outStream;
-         final PrintStream errS = errStream;
-         final InputStream inS = inStream)
-    {
-      print_method_call_info(outS, methodName, args);
+    if (Spartan.isFirstInstance(pidFileBaseName)) { // a guard mechanism used by singleton worker sub-commands
 
-      final String pidFileBaseName = String.join("-", "spartan-ex", cmd).toLowerCase();
+      /*### do the real work of the worker child process sub-command here ###*/
+      spartan.test.invokeGenerateDummyTestOutput(cmd, args, outStream, errStream);
 
-      if (Spartan.isFirstInstance(pidFileBaseName)) {
-
-
-        /*### call a method here to do the real work of the worker child process sub-command ###*/
-        spartan.test.invokeGenerateDummyTestOutput(args, outS, errS);
-
-
-      } else {
-        final String errmsg = format("Child command %s is already running", cmd);
-        errS.printf("%nWARNING: %s%n", errmsg);
-        log(LL_WARN, errmsg::toString); // logs to the service's stderr
-        status_code = 1;
-      }
-    } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
-      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
-      e.printStackTrace(errStream);
+    } else {
+      final String errmsg = format("Worker command %s is already running", cmd);
+      errStream.printf("%nWARNING: %s%n", errmsg);
+      log(LL_WARN, errmsg::toString); // logs to the service's stderr
       status_code = 1;
     }
 
-    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
+    return status_code; // worker child process should return a meaningful status code indicating success/failure
   }
 }
