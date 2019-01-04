@@ -16,12 +16,44 @@ Subscriber Flow.subscribe(ExecutorService executorService, InvokeResponseEx rsp)
 /* interactions with the invoker, especialy when many concurrent invocations  */
 InvokeResponseEx Spartan.invokeCommandEx(String... args) { ... }
 ```
+see: [React-style Spartan Flow class and interfaces, and invokeCommandEx()](#react-style-spartan-flow-class-and-interfaces-and-invokecommandex)
 
 # spartan "forking" java program launcher
 
 From Wikipedia: [Fork (system call)](https://en.wikipedia.org/wiki/Fork_%28system_call%29)
 
 > *In computing, particularly in the context of the Unix operating system and its workalikes, fork is an operation whereby a process creates a copy of itself. It is usually a system call, implemented in the kernel. Fork is the primary (and historically, only) method of process creation on Unix-like operating systems.*
+
+<!-- START doctoc generated TOC please keep comment here to allow auto update -->
+<!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
+
+
+- [Introduction](#introduction)
+- [What is spartan?](#what-is-spartan)
+  - [supervisor process and worker child processes](#supervisor-process-and-worker-child-processes)
+- [Why processes instead of threads only?](#why-processes-instead-of-threads-only)
+  - [`process forking` - the easiest and best way to implement a watchdog](#process-forking---the-easiest-and-best-way-to-implement-a-watchdog)
+- [what `spartan` brings to the table](#what-spartan-brings-to-the-table)
+  - [`spartan` annotations](#spartan-annotations)
+    - [supervisor `main` method service entry point](#supervisor-main-method-service-entry-point)
+    - [supervisor *sub command* method entry point](#supervisor-sub-command-method-entry-point)
+    - [worker child process *sub command* method entry point](#worker-child-process-sub-command-method-entry-point)
+  - [some spartan APIs and class data structures](#some-spartan-apis-and-class-data-structures)
+    - [`spartan` API for invoking a *sub command*](#spartan-api-for-invoking-a-sub-command)
+    - [`spartan` interplay with standard Linux shell commands](#spartan-interplay-with-standard-linux-shell-commands)
+  - [Requirements for building `spartan`:](#requirements-for-building-spartan)
+    - [A word about compiler choice - latest stable relase gcc/g++ 8.2.x or the older 4.8.x?](#a-word-about-compiler-choice---latest-stable-relase-gccg-82x-or-the-older-48x)
+      - [g++ 4.8.4 - release builds](#g-484---release-builds)
+      - [g++ 8.2.1 - release builds](#g-821---release-builds)
+    - [Maven configuration](#maven-configuration)
+    - [Java library dependencies](#java-library-dependencies)
+  - [`spartan` example programs](#spartan-example-programs)
+  - [How to deploy and run a `spartan` example program](#how-to-deploy-and-run-a-spartan-example-program)
+- [`spartan` road map - a hat tip to reactive programming](#spartan-road-map---a-hat-tip-to-reactive-programming)
+  - [React-style Spartan Flow class and interfaces, and invokeCommandEx()](#react-style-spartan-flow-class-and-interfaces-and-invokecommandex)
+- [Conclusion](#conclusion)
+
+<!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
 ## Introduction
 The java program launcher, `java` on Posix platforms and `java.exe` on Windows, has remained pretty much the same in functionality since the origin of the Java programming language. This default java program launcher provides a uniform experience for starting the execution of java programs on all supported platforms.
@@ -138,7 +170,8 @@ A java program launched by **spartan** has these capabilities and characteristic
 - spartan insures the supervisor is kept aware of child processes being started and terminated so as to keep `status` info current
 - spartan really does use the `fork` system call when establishing the supervisor process and any child processes, hence spartan is currently only available on Linux
 - each such process initializes its own instance of the Java JVM (a single instantiated Java JVM does not support being forked)
-- the easiest way to share configuration state is for the supervisor to *Java-serialize* a configuration object to a file and then child processes deserialize that config object when starting up; in this way startup configuration processing is done just once by the service supervisor process
+- the easiest way to share configuration state is for the supervisor to *Java-serialize* a configuration object over a pipe stream connection to invoked child processes, which then de-serialize that config object upon starting their execution; in this way, start-up configuration processing is done just once by the service supervisor process (e.g., building a complex schema registry at service start-up which is then shared to all child processes)
+  - *the new `Spartan.invokeCommandEx()` API enables a pipe stream from the invoker to the child process*
 - of course spartan programs can be coded to dynamically retrieve config info from services such as `Consul` too, or coded to use a combination of startup config initialization combined with point-in-time dynamic config retrieval
 - spartan makes use of custom annotations to denote:
     - supervisor `main` entry point
@@ -538,6 +571,7 @@ Spartan has been in production use for going on two years, but its development b
 - For the time being the `spartan` C++11 code base will remain compileable in g++ 4.8.x as that has been sufficient for its functionality and yields relatively small binaries when the C++ standard library is statically linked.
 - It's possible that `spartan` might support Kotlin as is but no attempt has been made to try it out yet (not using Kotlin in the day job so hasn't been a priority).
 - Java 8 is the only Java language version supported so far. Yet Java 10 is here now and will definitely be important to support. That will require a new round of significant development and testing effort (making sure to support Java modularity introduced in Java 9).
+- The Spartan client mode now uses the Linux `poll()` syscall for multiplex handling three pipe connections between the client process to an invoked sub-command process; so next underpin a variation of the Spartan Flow class and interfaces with `poll()` such that all Flow subscriptions chained into a single `FuturesCompletion` context are serviced behind the scenes by a single thread calling `poll()`, which hands off a ready-to-read notification asynchronously. (This will be a true reactive implementation that very much economizes on use of threads.)
 - Miscellaneous improvements (relatively easy enhancements):
     - provide for special variables that can be used in the `config.ini` file to denote the `spartan` install directory path and the directory path where the symbolic link is located
     - `spartan` private environment variable `SPARTAN_JAVA_HOME` that will take precedence over `JAVA_HOME` if it is defined
@@ -545,6 +579,8 @@ Spartan has been in production use for going on two years, but its development b
 **THIS IS NOW IMPLEMENTED!** ==>>
 
 - Addition of a new, enhanced, reactive-styled programming API, loosely based on the Java-9-introduced `java.util.concurrent.Flow` interfaces. This reactive programming influenced API is specifically for invoking worker child process sub commands. A new `invoke` method will return an extended `InvokeResponseEx` object:
+
+### React-style Spartan Flow class and interfaces, and invokeCommandEx()
 
 ```java
   class InvokeResponse {
