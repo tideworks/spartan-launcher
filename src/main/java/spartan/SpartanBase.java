@@ -386,6 +386,11 @@ public class SpartanBase implements Spartan {
    * <b>NOTE:</b> This helper method will be responsible for closing
    * the stream arguments - the called callable does not have to close
    * them.
+   * <p>
+   * If stream argument ownership needs to be transferred to a detached
+   * task, then use {@link #commandForwarderNoStreamClose(String[],
+   * PrintStream, PrintStream, InputStream, CallableSupervisorCommand)}
+   * instead.
    *
    * @param args supervisor command arguments (first element is name of the command)
    * @param outStream output stream to write processing data/info to
@@ -414,11 +419,43 @@ public class SpartanBase implements Spartan {
   }
 
   /**
+   * Helper method that does the outermost boilerplate handling for
+   * supervisor commands (but it does not close the io stream arguments)
+   * - the user method to be executed to implement the command is passed
+   * as the right-most lambda argument.
+   * <p>
+   * Frequently supervisor commands may want to transfer ownership of
+   * the streams to a detached task, in which case the transferred streams
+   * should not be closed. This helper method is best for that scenario.
+   *
+   * @param args supervisor command arguments (first element is name of the command)
+   * @param outStream output stream to write processing data/info to
+   * @param errStream error output stream to write errors, health-check-info, out-of-band protocol
+   * @param inStream an input stream for receiving data from the invoker
+   * @param callable the user-supplied callable which implements the command
+   */
+  protected static void commandForwarderNoStreamClose(String[] args, PrintStream outStream, PrintStream errStream,
+                                                      InputStream inStream, CallableSupervisorCommand callable)
+  {
+    try {
+      assert args.length > 0;
+      final String cmd = args[0];
+      final String[] remainingArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+
+      callable.call(cmd, remainingArgs, outStream, errStream, inStream);
+
+    } catch(Throwable e) {
+      errStream.printf("%nERROR: %s: exception thrown:%n", args.length > 0 ? args[0] : "{invalid command}");
+      e.printStackTrace(errStream);
+    }
+  }
+
+  /**
    * A callable worker child process command must return a status code
    * result where 0 indicates success and 1 indicates failure.
    */
   @FunctionalInterface
-  protected interface CallableWorkerCommand {
+  public interface CallableWorkerCommand {
     int call(String cmd, String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) throws
           Exception;
   }
@@ -438,7 +475,7 @@ public class SpartanBase implements Spartan {
    * @param inStream an input stream for the worker to receive data from the invoker
    * @param callable the user-supplied callable which implements the command
    */
-  protected static void commandForwarder(String[] args, PrintStream outStream, PrintStream errStream,
+  public static void commandForwarder(String[] args, PrintStream outStream, PrintStream errStream,
                                          InputStream inStream, CallableWorkerCommand callable)
   {
     @SuppressWarnings("UnusedAssignment")
