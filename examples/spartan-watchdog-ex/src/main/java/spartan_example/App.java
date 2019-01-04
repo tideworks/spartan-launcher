@@ -213,10 +213,9 @@ public class App extends SpartanBase {
 
   @SupervisorCommand("START_WATCHDOG")
   public void startWatchdog(String[] args, PrintStream rspStream) {
-    final String methodName = "startWatchdog";
+    print_method_call_info(rspStream, clsName, "startWatchdog", args);
 
     try (final PrintStream rsp = rspStream) {
-      print_method_call_info(rsp, methodName, args);
       assert args.length > 0;
 
       final String cmd = args[0];
@@ -242,10 +241,9 @@ public class App extends SpartanBase {
 
   @SupervisorCommand("STOP_WATCHDOG")
   public void stopWatchdog(String[] args, PrintStream rspStream) {
-    final String methodName = "stopWatchdog";
+    print_method_call_info(rspStream, clsName, "stopWatchdog", args);
 
     try (final PrintStream rsp = rspStream) {
-      print_method_call_info(rsp, methodName, args);
       assert args.length > 0;
 
       final String cmd = args[0];
@@ -277,7 +275,7 @@ public class App extends SpartanBase {
    *             by options (if any)
    */
   private void invokeChildCmd(String... args) {
-    assert(args.length > 0);
+    assert args.length > 0;
     try {
       final String childCommand = args[0].toLowerCase();
       final int maxIndex = PSEUDO_FIBONACCI.length - 1;
@@ -377,18 +375,6 @@ public class App extends SpartanBase {
   }
 
   /**
-   * Diagnostic helper method that prints debug info for a called command method.
-   *
-   * @param rspStream output stream to print info to
-   * @param methodName name of the command method that was called
-   * @param args arguments that were passed to the invoked method
-   */
-  private static void print_method_call_info(PrintStream rspStream, String methodName, String[] args) {
-    final String stringizedArgs = String.join("\" \"", args);
-    rspStream.printf(">> %s.%s(\"%s\")%n", clsName, methodName, stringizedArgs);
-  }
-
-  /**
    * Example Spartan child worker sub-command entry-point method.
    * (Does a simulated processing activity.)
    * <p>
@@ -412,18 +398,15 @@ public class App extends SpartanBase {
    */
   @ChildWorkerCommand(cmd="CONTINUOUS_ETL", jvmArgs={"-Xms48m", "-Xmx128m"})
   public static void doContinuousEtlProcessing(String[] args, PrintStream rspStream) {
-    final String methodName = "doContinuousEtlProcessing";
-    assert args.length > 0;
-
-    final String cmd = args[0];
+    print_method_call_info(rspStream, clsName, "doContinuousEtlProcessing", args);
 
     int status_code = 0;
 
     try (final PrintStream rsp = rspStream) {
-      print_method_call_info(rspStream, methodName, args);
+      assert args.length > 0;
 
-      final String cmd_lc = args[0].toLowerCase();
-      final String pidFileBaseName = String.join("-", "spartan-watchdog-ex", cmd_lc);
+      final String cmd = args[0];
+      final String pidFileBaseName = String.join("-", "spartan-watchdog-ex", cmd.toLowerCase());
 
       if (Spartan.isFirstInstance(pidFileBaseName)) {
 
@@ -432,16 +415,18 @@ public class App extends SpartanBase {
 
 
         /*### call a method here to do the real work of the worker child process sub-command ###*/
+        print_method_call_info(rspStream, "spartan.test", "invokeGenerateDummyTestOutput", args);
         spartan.test.invokeGenerateDummyTestOutput(args, rsp, rsp);
 
 
       } else {
-        final String errmsg = format("Child command %s is already running", cmd_lc);
+        final String errmsg = format("Child command %s is already running", cmd);
         rsp.printf("WARNING: %s%n", errmsg);
         log(LL_WARN, errmsg::toString); // logs to the service's stderr
+        status_code = 1;
       }
     } catch (Throwable e) { // catch all exceptions here and deal with them (don't let them propagate)
-      rspStream.printf("%nERROR: %s: exception thrown:%n", cmd);
+      rspStream.printf("%nERROR: %s: exception thrown:%n", args.length > 0 ? args[0] : "{invalid command}");
       e.printStackTrace(rspStream);
       status_code = 1;
     }
