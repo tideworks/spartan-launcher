@@ -45,6 +45,7 @@ import static java.util.stream.Collectors.toList;
 
 @SuppressWarnings({"unused", "JavaDoc"})
 public class App extends SpartanBase {
+  private static final String clsName = App.class.getSimpleName();
   private static final Set<Integer> _pids = ConcurrentHashMap.newKeySet(53);
   private static final int BUF_SIZE = 0x4000;
 
@@ -114,63 +115,51 @@ public class App extends SpartanBase {
     }
   }
 
-  private static void print_method_call_info(PrintStream rspStream, String methodName, String[] args) {
-    final String output = String.join("\" \"", args);
-    rspStream.printf("DEBUG: invoked %s.%s(\"%s\")%n", App.class.getName(), methodName, output);
-  }
-
   @SupervisorCommand("MASS_UNCOMPRESS")
   public void massUncompress(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "massUncompress";
-    assert args.length > 0;
+    print_method_call_info(errStream, clsName, "massUncompress", args);
+    commandForwarder(args, outStream, errStream, inStream, this::coreMassUncompress);
+  }
 
-    final String cmd = args[0];
-
-    try (final PrintStream outS = outStream;
-         final PrintStream errS = errStream;
-         final InputStream ignore = inStream)
-    {
-      print_method_call_info(errS, methodName, args);
-      if (args.length < 2) {
-        errS.printf("ERROR: %s: expected directory path - insufficient commandline arguments%n", cmd);
-        return;
-      }
-
-      final Path dirPath = validatePath(cmd, args[1], errS, true);
-      if (dirPath == null) {
-        return;
-      }
-
-      final List<Path> gzFilesList = new ArrayList<>(40);
-
-      // obtain list of .gz files to be decompressed
-      final EnumSet<FileVisitOption> options = EnumSet.of(FileVisitOption.FOLLOW_LINKS);
-      walkFileTree(dirPath, options/*EnumSet.noneOf(FileVisitOption.class)*/, Integer.MAX_VALUE,
-            new SimpleFileVisitor<Path>() {
-              @Override
-              public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                outS.print(dir);
-                outS.println(File.separatorChar);
-                return FileVisitResult.CONTINUE;
-              }
-              @Override
-              public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (file.getFileName().toString().endsWith(".gz")) {
-                  gzFilesList.add(file);
-                  outS.println(file);
-                }
-                return FileVisitResult.CONTINUE;
-              }
-            });
-
-      final int processedCount = gzFilesList.isEmpty() ? 0 : processGzFiles(cmd, dirPath, gzFilesList, outS, errS);
-
-      outS.printf("done! %d of %d files processed%n", processedCount, gzFilesList.size());
-
-    } catch (Throwable e) {
-      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
-      e.printStackTrace(errStream);
+  private void coreMassUncompress(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                  InputStream inStream) throws Exception
+  {
+    if (args.length < 1) {
+      errStream.printf("ERROR: %s: expected directory path - insufficient commandline arguments%n", cmd);
+      return;
     }
+
+    final Path dirPath = validatePath(cmd, args[0], errStream, true);
+    if (dirPath == null) {
+      return;
+    }
+
+    final List<Path> gzFilesList = new ArrayList<>(40);
+
+    // obtain list of .gz files to be decompressed
+    final EnumSet<FileVisitOption> options = EnumSet.of(FileVisitOption.FOLLOW_LINKS);
+    walkFileTree(dirPath, options/*EnumSet.noneOf(FileVisitOption.class)*/, Integer.MAX_VALUE,
+          new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
+              outStream.print(dir);
+              outStream.println(File.separatorChar);
+              return FileVisitResult.CONTINUE;
+            }
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+              if (file.getFileName().toString().endsWith(".gz")) {
+                gzFilesList.add(file);
+                outStream.println(file);
+              }
+              return FileVisitResult.CONTINUE;
+            }
+          });
+
+    final int processedCount = gzFilesList.isEmpty()
+          ? 0 : processGzFiles(cmd, dirPath, gzFilesList, outStream, errStream);
+
+    outStream.printf("INFO: %s: done! %d of %d files processed%n", cmd, processedCount, gzFilesList.size());
   }
 
   private static Path validatePath(String cmd, String pathStr, PrintStream errS, boolean asDirectory) {
@@ -220,7 +209,7 @@ public class App extends SpartanBase {
   {
     final BiFunction<String, String[], Path> getPath = srcDir.getFileSystem()::getPath;
     final List<Path> errLogFiles = new ArrayList<>(gzFilesList.size());
-    final List<Integer> childrenPIDs = new ArrayList<>(gzFilesList.size()); // use for audit check
+    final Set<Integer> childrenPIDs = new LinkedHashSet<>(); // use for audit check
 
     Subscriber subscriber = null;
 
@@ -246,25 +235,24 @@ public class App extends SpartanBase {
             .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outputFileStream, subscription));
     }
 
-    outS.printf("INFO: %s: subscriptions added for %d files, now start processing...%n", cmd, gzFilesList.size());
+    if (subscriber == null) return 0;
 
-    assert subscriber != null;
+    outS.printf("INFO: %s: subscriptions added for %d files, now start processing...%n", cmd, childrenPIDs.size());
+
     final FuturesCompletion pendingFutures = subscriber.start();
 
     final ExecutorService executor = pendingFutures.getExecutor();
 
-    int count = pendingFutures.count(); // number of task the ExecutorCompletionService will be processing to completion
+    final Set<String> pidStrs = new LinkedHashSet<>(); // for collecting returned child process pids as string values
 
-    final Set<String> pids = new LinkedHashSet<>(); // for collecting returned child process pids as string values
-
-    int i = 0;
+    int i = 0, count = pendingFutures.count(); // number of task the ExecutorCompletionService will be overseeing
     try {
       while(count-- > 0) {
         try {
           final Integer childPID = pendingFutures.take().get();
           _pids.remove(childPID);
           childrenPIDs.remove(childPID);
-          pids.add(childPID.toString());
+          pidStrs.add(childPID.toString());
           i++;
         } catch (ExecutionException e) {
           final Throwable cause = e.getCause() != null ? e.getCause() : e;
@@ -277,15 +265,13 @@ public class App extends SpartanBase {
       }
     } finally {
       executor.shutdown();
-      if (!executor.awaitTermination(3, TimeUnit.SECONDS)) {
-        executor.shutdownNow();
-      }
+      waitOnExecServiceTermination(executor, 5);
     }
 
     if (!childrenPIDs.isEmpty()) {
-      final List<String> remaining = childrenPIDs.stream().map(Object::toString).collect(toList());
+      final String[] remaining = childrenPIDs.stream().map(Object::toString).collect(toList()).toArray(new String[0]);
       errS.printf("ERROR: %s: %d subscription(s) futures results unharvested:%n%s%n",
-            cmd, remaining.size(), String.join(",", remaining.toArray(new String[0])));
+            cmd, remaining.length, String.join(",", remaining));
     }
 
     final Predicate<Path> isEmptyFile = path -> {
@@ -309,22 +295,36 @@ public class App extends SpartanBase {
     // remove all empty error log files
     errLogFiles.stream().filter(isEmptyFile).forEach(deleteFile);
 
-    outS.printf("INFO: %s: %d subscription(s) completed - %d process pid(s):%n%s%n",
-          cmd, i, pids.size(), String.join(",", pids.toArray(new String[0])));
+    outS.printf("INFO: %s: %d subscription tasks completed by %d process pid(s):%n%s%n",
+          cmd, i, pidStrs.size(), String.join(",", pidStrs.toArray(new String[0])));
 
-    return pids.size();
+    return pidStrs.size(); // returning number of harvested subscriptions (should equal number of input files)
+  }
+
+  @SuppressWarnings("SameParameterValue")
+  private static void waitOnExecServiceTermination(ExecutorService excSrvc, int waitTime) {
+    // waits for termination for waitTime (seconds only)
+    for (int i = waitTime; !excSrvc.isTerminated() && i > 0; i--) {
+      try {
+        excSrvc.awaitTermination(1, TimeUnit.SECONDS);
+      } catch (InterruptedException ignored) {
+      }
+      System.out.print('.');
+    }
+    excSrvc.shutdownNow();
   }
 
   private static long copyWithClose(InputStream fromStream, OutputStream toStream, Subscription subscription) {
+    long count = 0;
     try (final InputStream from = fromStream;
          final OutputStream to = toStream;
          final OutputStream ignored = subscription.getRequestStream())
     {
-      return copy(from, to);
+      count = copy(from, to);
     } catch (IOException e) {
       uncheckedExceptionThrow(e);
     }
-    return 0; // will never reach this statement, but hushes compiler
+    return count;
   }
 
   private static long copy(InputStream from, OutputStream to) throws IOException {
@@ -343,39 +343,25 @@ public class App extends SpartanBase {
   }
 
   @ChildWorkerCommand(cmd = "UN_GZIP", jvmArgs = {"-server", "-Xms64m", "-Xmx128m"})
-  public static void uncompressGzFile(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    final String methodName = "uncompressGzFile";
-    assert args.length > 0;
+  public static void uncompressGzFile(String[] args, PrintStream outStream, PrintStream errStream,
+                                      InputStream inStream)
+  {
+//    print_method_call_info(errStream, clsName, "uncompressGzFile", args);
+    commandForwarder(args, outStream, errStream, inStream, App::uncompressGzFileImpl);
+  }
 
-    final String cmd = args[0];
-
-    int status_code = 0;
-
-    try (final PrintStream outS = outStream;
-         final PrintStream errS = errStream;
-         final InputStream inS = inStream)
-    {
-//      print_method_call_info(errS, methodName, args);
-      if (args.length < 2) {
-        errS.printf("ERROR: %s: expected .gz file path - insufficient commandline arguments%n", cmd);
-        status_code = 1;
-      } else {
-        final Path filePath = validatePath(cmd, args[1], errS, false);
-        if (filePath == null) {
-          status_code = 1;
-        } else {
-
-          status_code = uncompressGzFileCore(cmd, filePath, outS, errS, inS);
-
-        }
-      }
-    } catch (Throwable e) {
-      errStream.printf("%nERROR: %s: exception thrown:%n", cmd);
-      e.printStackTrace(errStream);
-      status_code = 1;
+  private static int uncompressGzFileImpl(String cmd, String[] args, PrintStream outStream, PrintStream errStream,
+                                          InputStream inStream)
+  {
+    if (args.length < 1) {
+      errStream.printf("ERROR: %s: expected .gz file path - insufficient commandline arguments%n", cmd);
+      return 1;
     }
 
-    System.exit(status_code); // worker child process should return a meaningful status code indicating success/failure
+    final Path filePath = validatePath(cmd, args[0], errStream, false);
+
+    // worker child process should return a meaningful status code indicating success/failure (zero == success)
+    return filePath != null ? uncompressGzFileCore(cmd, filePath, outStream, errStream, inStream) : 1;
   }
 
   private static int uncompressGzFileCore(String cmd, Path filePath, OutputStream outS, PrintStream errS,
