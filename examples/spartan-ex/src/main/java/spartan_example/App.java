@@ -21,7 +21,6 @@ package spartan_example;
 import static java.lang.String.format;
 
 import java.io.*;
-import java.util.Arrays;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -166,7 +165,7 @@ public class App extends SpartanBase {
    */
   @SupervisorCommand("GENFIB")
   public void generateFibonacciSequence(String[] args, PrintStream rspStream) {
-    print_method_call_info(clsName, "generateFibonacciSequence", args);
+    print_method_call_info(rspStream, clsName, "generateFibonacciSequence", args);
 
     try (final PrintStream rsp = rspStream) {
       assert args.length > 0;
@@ -238,7 +237,7 @@ public class App extends SpartanBase {
    */
   @SupervisorCommand("INVOKECHILDCMD")
   public void invokeChildCmd(String[] args, PrintStream outStream, PrintStream errStream, InputStream inStream) {
-    print_method_call_info(clsName, "invokeChildCmd", args);
+    print_method_call_info(outStream, clsName, "invokeChildCmd", args);
     commandForwarderNoStreamClose(args, outStream, errStream, inStream, this::coreInvokeChildCmd);
   }
 
@@ -246,12 +245,12 @@ public class App extends SpartanBase {
                                   InputStream inStream)
   {
     try {
-      if (args.length < 2) {
+      if (args.length < 1) {
         errStream.println("ERROR: no child command specified - insufficient command line arguments");
         return;
       }
 
-      final String child_cmd = args[1];
+      final String child_cmd = args[0];
 
       if (cmd.equalsIgnoreCase(child_cmd)) {
         errStream.printf("ERROR: cannot invoke self, %s, as child command to run%n", child_cmd);
@@ -259,7 +258,7 @@ public class App extends SpartanBase {
       }
 
       // spawning a worker child process per the specified child sub-command
-      final InvokeResponseEx rsp = Spartan.invokeCommandEx(Arrays.copyOfRange(args, 1, args.length));
+      final InvokeResponseEx rsp = Spartan.invokeCommandEx(args);
       _pids.add(rsp.childPID);
 
       final PrintStream taskOutS = outStream; // the async task will take ownership of the output stream
@@ -345,7 +344,7 @@ public class App extends SpartanBase {
   public static void doGenesisEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream,
                                             InputStream inStream)
   {
-    print_method_call_info(clsName, "doGenesisEtlProcessing", args);
+    print_method_call_info(outStream, clsName, "doGenesisEtlProcessing", args);
     commandForwarder(args, outStream, errStream, inStream, App::doCoreGenesisEtlProcessing);
   }
 
@@ -353,6 +352,7 @@ public class App extends SpartanBase {
                                                 InputStream inStream)
   {
     /*### do the real work of the worker child process sub-command here ###*/
+    print_method_call_info(outStream, "spartan.test", "invokeGenerateDummyTestOutput", args);
     spartan.test.invokeGenerateDummyTestOutput(cmd, args, outStream, errStream);
 
     return 0; // worker child process should return a meaningful status code indicating success/failure
@@ -386,7 +386,7 @@ public class App extends SpartanBase {
   public static void doCdcEtlProcessing(String[] args, PrintStream outStream, PrintStream errStream,
                                         InputStream inStream)
   {
-    print_method_call_info(clsName, "doCdcEtlProcessing", args);
+    print_method_call_info(outStream, clsName, "doCdcEtlProcessing", args);
     commandForwarder(args, outStream, errStream, inStream, App::doCoreCdcEtlProcessing);
   }
 
@@ -400,6 +400,7 @@ public class App extends SpartanBase {
     if (Spartan.isFirstInstance(pidFileBaseName)) { // a guard mechanism used by singleton worker sub-commands
 
       /*### do the real work of the worker child process sub-command here ###*/
+      print_method_call_info(outStream, "spartan.test", "invokeGenerateDummyTestOutput", args);
       spartan.test.invokeGenerateDummyTestOutput(cmd, args, outStream, errStream);
 
     } else {
