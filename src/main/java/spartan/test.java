@@ -50,7 +50,7 @@ import spartan.annotations.ChildWorkerCommand;
 import spartan.annotations.SupervisorCommand;
 import spartan.annotations.SupervisorMain;
 
-@SuppressWarnings("unused")
+@SuppressWarnings({"unused", "WeakerAccess"})
 public final class test extends SpartanBase {
   private static final String clsName = test.class.getName();
   private static final String methodEntryExitFmt = "%s %s.%s(): @@@@@ %s test and print diagnostics output @@@@@%n";
@@ -240,20 +240,30 @@ public final class test extends SpartanBase {
     }
   }
 
-  public static void invokeGenerateDummyTestOutput(String[] args, PrintStream rspStream, PrintStream errStream) {
-    assert args.length > 0;
-    final String cmd = args[0];
+  public static void invokeGenerateDummyTestOutput(String cmd, String[] args, PrintStream rspStream,
+                                                   PrintStream errStream)
+  {
     if (args.length > 1) {
       final Set<String> argsSet = new LinkedHashSet<>(Arrays.asList(args));
       final boolean runForever = argsSet.remove(runForeverOptn);
-      argsSet.remove(cmd);
-      final String[] remain_args = argsSet.toArray(new String[0]);
-      final String input_string = format("\"%s\"", String.join("\" \"", remain_args));
+      argsSet.remove(cmd); // should really already be removed
+      final String[] remainingArgs = argsSet.toArray(new String[0]);
+      final String input_string = format("\"%s\"", String.join("\" \"", remainingArgs));
       generateDummyTestOutput(input_string, rspStream, runForever);
     } else {
       final String errmsg = format("%s child worker has no input JSON filepath specified to process", cmd.toLowerCase());
       errStream.printf("ERROR: %s%n", errmsg);
       log(LL_ERR, ()->errmsg);
+    }
+  }
+
+  public static void invokeGenerateDummyTestOutput(String[] args, PrintStream rspStream, PrintStream errStream) {
+    if (args.length > 0) {
+      final String cmd = args[0];
+      final String[] remainingArgs = args.length > 1 ? Arrays.copyOfRange(args, 1, args.length) : new String[0];
+      invokeGenerateDummyTestOutput(cmd, remainingArgs, rspStream, errStream);
+    } else {
+      throw new AssertionError("{invalid command}");
     }
   }
 
