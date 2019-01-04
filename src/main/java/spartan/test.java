@@ -243,7 +243,7 @@ public final class test extends SpartanBase {
   public static void invokeGenerateDummyTestOutput(String cmd, String[] args, PrintStream rspStream,
                                                    PrintStream errStream)
   {
-    if (args.length > 1) {
+    if (args.length > 0) {
       final Set<String> argsSet = new LinkedHashSet<>(Arrays.asList(args));
       final boolean runForever = argsSet.remove(runForeverOptn);
       argsSet.remove(cmd); // should really already be removed

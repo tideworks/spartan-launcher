@@ -340,21 +340,15 @@ public class SpartanBase implements Spartan {
 
   /**
    * Diagnostic helper method that prints debug info for a called command method.
-   * The info is only printed when Spartan verbosity level is set to no less than
-   * DEBUG. Also, the info is printed to the stderr of the supervisor process, or
-   * the stderr of the service.
    *
+   * @param outS stream to print info to
    * @param clsName owning class of the command method that was called
    * @param methodName name of the command method that was called
    * @param args arguments that were passed to the invoked method
    */
-  public static void print_method_call_info(String clsName, String methodName, String[] args) {
-    if (loggingLevel >= LL_DEBUG) {
-      log(LL_DEBUG, () -> {
-        final String output = String.join("\" \"", args);
-        return String.format(">> invoked %s.%s(\\\"%s\\\")", clsName, methodName, output);
-      });
-    }
+  public static void print_method_call_info(PrintStream outS, String clsName, String methodName, String[] args) {
+    final String output = String.join("\" \"", args);
+    outS.printf(">> invoked %s.%s(\\\"%s\\\")%n", clsName, methodName, output);
   }
 
   /**
