@@ -52,6 +52,26 @@ From Wikipedia: [Fork (system call)](https://en.wikipedia.org/wiki/Fork_%28syste
 - [`spartan` road map - a hat tip to reactive programming](#spartan-road-map---a-hat-tip-to-reactive-programming)
   - [React-style Spartan Flow class and interfaces, and invokeCommandEx()](#react-style-spartan-flow-class-and-interfaces-and-invokecommandex)
 - [Conclusion](#conclusion)
+- [Appendices](#appendices)
+  - [Appendix 1: Spartan helper classes and methods](#appendix-1-spartan-helper-classes-and-methods)
+    - [helper methods](#helper-methods)
+    - [helper classes](#helper-classes)
+  - [Appendix 2: HowTo Guide - Downloading Source Code and Building Spartan - step-by-step](#appendix-2-howto-guide---downloading-source-code-and-building-spartan---step-by-step)
+    - [Starting from blank slate - Digital Ocean CentOS 7.5 VM](#starting-from-blank-slate---digital-ocean-centos-75-vm)
+    - [Checking for prerequistes](#checking-for-prerequistes)
+    - [Install Java 8 OpenJDK:](#install-java-8-openjdk)
+      - [Download and confirm the AdoptOpenJDK Java 8 JDK](#download-and-confirm-the-adoptopenjdk-java-8-jdk)
+      - [Install and configure the AdoptOpenJDK Java 8 JDK](#install-and-configure-the-adoptopenjdk-java-8-jdk)
+      - [Set environment variable `JAVA_HOME` and symbolic links](#set-environment-variable-java_home-and-symbolic-links)
+    - [Install build tools:](#install-build-tools)
+      - [install Maven](#install-maven)
+      - [install gcc/g++ compiler](#install-gccg-compiler)
+      - [install CMake](#install-cmake)
+      - [install libpopt development package](#install-libpopt-development-package)
+    - [Clone Spartan source code from github](#clone-spartan-source-code-from-github)
+    - [Build Spartan using Maven](#build-spartan-using-maven)
+    - [Build Spartan example programs](#build-spartan-example-programs)
+  - [Appendix 3: Running the Spartan example programs](#appendix-3-running-the-spartan-example-programs)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -755,3 +775,372 @@ An object serialization abstraction layer could further be devised on top of thi
 In other programming languages what **spartan** empowers would perhaps not be very special. Concurrent programming using processes is a rather ancient practice in computing. All manner of stalwart programs that run as services on Linux, like PostgreSQL, MySQL, Redis (many others) - and desktop applications such as Chrome browser and lately the Firefox brower - utilize multi-process concurrent programming as core to how they are designed and operate.
 
 However, for the Java language, where this manner of programming now becomes so facile, its very much like a new landscape of program architecture is presenting itself. Enjoy.
+
+## Appendices
+
+### Appendix 1: Spartan helper classes and methods
+
+#### helper methods
+
+- `spartan.SpartanBase.enterSupervisorMode()` methods - for entering service mode
+- `spartan.SpartanBase.drainKillProcessGroup` method - can manage drain-stop killing any active child processes
+- `spartan.SpartanBase.statusHelper()` method - can leverage for when overriding `status` sub command for customization
+- `spartan.SpartanBase.print_method_call_info()` method - can use for diagnostic display of sub command entry-point method
+- `spartan.SpartanBase.closeStream()` method - can use for closing io streams at outermost call level where don't want to propagate exceptions
+- `spartan.SpartanBase.commandForwarder()` methods - for reducing boilerplate coding at sub command entry points
+- `spartan.Spartan.isFirstInstance()` method - establish fence around singleton child sub-commands
+
+#### helper classes
+
+- `spartan.util.io.ReadLine` class - zero to low garbage text stream reading
+- `spartan.util.io.ByteArrayOutputStream` class - allows fully owning and accessing its internal byte array buffer
+- `spartan.SpartanSysLogAppender` class - for use with logback/slf4j-based Java application logging (allows ERROR and FATAL level to be *syslogged*)
+
+### Appendix 2: HowTo Guide - Downloading Source Code and Building Spartan - step-by-step
+
+#### Starting from blank slate - Digital Ocean CentOS 7.5 VM
+
+This tutorial will start with a blank slate - a Digital Ocean CentOS 7.5 VM with 1GB of memory. I then create a user `buildr` that has `sudo` permission and use `su` to login as that user:
+```shell
+$ su buildr
+
+$ cd ~
+```
+
+**NOTE:** in this tutorial, the `$` character is representing the shell prompt.
+
+#### Checking for prerequistes
+
+As prerequisties I will need to insure these are present:
+
+- `yum` (or `dnf`)
+- `wget`
+- `unzip`
+- `git`
+- `sha256sum`
+
+I run the following to check if these are present:
+```shell
+$ which yum
+/usr/bin/yum
+$ which unzip
+/usr/bin/which: no unzip in (/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/buildr/bin)
+$ which wget
+/usr/bin/which: no wget in (/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/buildr/bin)
+$ which git
+/usr/bin/which: no git in (/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/buildr/bin)
+$ which $ which sha256sum
+/usr/bin/sha256sum
+```
+
+Alas, only two out of the five are present - thus I will need to package install `unzip`, `wget`, and `git`:
+```shell
+$ sudo yum -y install zip unzip
+
+$ sudo yum -y install wget
+
+$ sudo yum -y install git
+```
+After the install completes I check the `git` version:
+```shell
+$ git --version
+git version 1.8.3.1
+```
+
+#### Install Java 8 OpenJDK:
+
+##### Download and confirm the AdoptOpenJDK Java 8 JDK
+
+I will use the [AdoptOpenJDK](https://adoptopenjdk.net/) distribution of the Java 8 JDK - for Linux x64 and the Hotspot build:
+```shell
+$ wget https://github.com/AdoptOpenJDK/openjdk8-binaries/releases/download/jdk8u192-b12/OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz -S OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz
+```
+And also download its sha256 checksum file:
+```shell
+$ wget https://github.com/AdoptOpenJDK/openjdk8-binaries/releases/download/jdk8u192-b12/OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz.sha256.txt -S OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz.sha256.txt
+```
+And then confirm the Open JDK download:
+```shell
+$ ls -l OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz
+-rw-rw-r-- 1 buildr buildr 78343064 Nov  1 04:42 OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz
+
+$ cat OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz.sha256.txt
+19c91906c220c8eac38179fb661a810c451779a65b8be530c1d98e15b6bb2673  OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz
+```
+And run `sha256sum` tool on the downloaded Open JDK binary:
+```shell
+$ sha256sum OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz
+19c91906c220c8eac38179fb661a810c451779a65b8be530c1d98e15b6bb2673  OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz
+```
+Great! The checksum confirms.
+
+##### Install and configure the AdoptOpenJDK Java 8 JDK
+
+I will choose to uncompress the Open JDK to be under this directory:
+
+`/usr/local/java`
+
+The subdirectory `java` does not exist yet so I will create that first:
+
+`$ sudo mkdir /usr/local/java`
+
+And then untar/uncompress the Open JDK to be under that location:
+
+`$ sudo tar -xvf OpenJDK8U-jdk_x64_linux_hotspot_8u192b12.tar.gz -C /usr/local/java/`
+
+Which results in this extracted directory:
+```shell
+$ ls -ld /usr/local/java/jdk8u192-b12
+drwxrwxr-x 9 buildr buildr 4096 Oct 31 19:41 /usr/local/java/jdk8u192-b12
+```
+I then change the ownership to `root`:
+```shell
+$ sudo chown root:root -R /usr/local/java/jdk8u192-b12
+
+$ ls -ld /usr/local/java/jdk8u192-b12
+drwxrwxr-x 9 root root 4096 Oct 31 19:41 /usr/local/java/jdk8u192-b12
+```
+
+##### Set environment variable `JAVA_HOME` and symbolic links
+
+I will now use the `vi` editor to add environment variable definitions:
+
+`sudo vi /etc/environment`
+
+Add these two definitions and then save and exit the editor:
+```
+JAVA_HOME=/usr/local/java/jdk8u192-b12
+JDK8_BIN=/usr/local/java/jdk8u192-b12/bin
+```
+
+**NOTE:** The `/etc/environment` file does not support referencing shell variables in the value - so a variable must be defined with plain, literal text; but this is the most global-reaching place to define Linux environment variables.
+
+It will now be necessary to exit from the `buildr` user session, then exit the `ssh` session to the VM, reconnect an `ssh` session, and then re-enter a new `buildr` user session so that these environment variables can go into effect:
+```shell
+$ exit
+
+$ su buildr
+
+$ cd ~
+```
+
+**NOTE:** Normally, for definitions added to user files `~/.bashrc` or `~/.bash_profile` or `~/.profile` it is sufficient to just re-source to get the new definitions, e.g.:  
+
+`source ~/.bash_profile`
+
+Once I've done that and am back in at a `buildr` shell prompt, I can verify my new JDK environment variables:
+```shell
+$ echo $JAVA_HOME
+/usr/local/java/jdk8u192-b12
+
+$ echo $JDK8_BIN
+/usr/local/java/jdk8u192-b12/bin
+```
+
+I will now create symbolic links for executing `java` and `javac`:
+```shell
+$ sudo ln -s $JDK8_BIN/java /usr/local/bin/java
+
+$ sudo ln -s $JDK8_BIN/javac /usr/local/bin/javac
+
+$ sudo ln -s $JDK8_BIN/javah /usr/local/bin/javah
+```
+And then invoke `java` and `javac` to verify that they're found on PATH and their versions are as expected:
+```shell
+$ java -version
+openjdk version "1.8.0_192"
+OpenJDK Runtime Environment (AdoptOpenJDK)(build 1.8.0_192-b12)
+OpenJDK 64-Bit Server VM (AdoptOpenJDK)(build 25.192-b12, mixed mode)
+
+$ javac -version
+javac 1.8.0_192
+
+$ javah -version
+javah version "1.8.0_192"
+```
+
+**NOTE:** If one wanted to run the other JDK tools, then $JDK8_BIN should be added to the PATH definition in, say, the user `~/.bash_profile` or `~/.profile`
+
+#### Install build tools:
+
+Next I will proceed to install Maven, the gcc/g++ compiler, CMake, and libpopt
+
+##### install Maven
+
+```shell
+$ wget http://mirror.cc.columbia.edu/pub/software/apache/maven/maven-3/3.3.9/binaries/apache-maven-3.3.9-bin.tar.gz -S apache-maven-3.3.9-bin.tar.gz
+```
+And then untar/uncompress into an install directory and create a symbolic link to `mvn`:
+```shell
+$ sudo mkdir /usr/local/maven
+
+$ sudo tar -xvf apache-maven-3.3.9-bin.tar.gz -C /usr/local/maven/
+
+$ sudo chown root:root -R /usr/local/maven/apache-maven-3.3.9
+
+$ sudo ln -s /usr/local/maven/apache-maven-3.3.9/bin/mvn /usr/local/bin/mvn
+```
+Now verify `mvn` executes and displays expected version:
+```shell
+$ mvn --version
+Apache Maven 3.3.9 (bb52d8502b132ec0a5a3f4c09453c07478323dc5; 2015-11-10T16:41:47+00:00)
+Maven home: /usr/local/maven/apache-maven-3.3.9
+Java version: 1.8.0_192, vendor: Oracle Corporation
+Java home: /usr/local/java/jdk8u192-b12/jre
+Default locale: en_US, platform encoding: UTF-8
+OS name: "linux", version: "2.6.32-696.30.1.el6.x86_64", arch: "amd64", family: "unix"
+```
+
+##### install gcc/g++ compiler
+
+```shell
+$ sudo yum -y install gcc-c++ glibc-static libstdc++-static
+```
+Then verify the g++ compiler version:
+```shell
+$ g++ --version
+g++ (GCC) 4.8.5 20150623 (Red Hat 4.8.5-36)
+Copyright (C) 2015 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+```
+This version of the GNU gcc/g++ compiler gets to the C++11 compliance level required by Spartan.
+
+##### install CMake
+
+```shell
+$ sudo yum -y install cmake
+
+$ cmake --version
+cmake version 2.8.12.2
+
+$ which cmake
+/usr/bin/cmake
+```
+The installed CMake executable is at the path location that the CMake Maven plugin looks to locate it at.
+
+##### install libpopt development package
+
+```shell
+$ wget http://mirror.centos.org/centos/7/os/x86_64/Packages/popt-devel-1.13-16.el7.i686.rpm -S popt-devel-1.13-16.el7.i686.rpm
+
+$ sudo yum -y install popt-devel-1.13-16.el7.i686.rpm
+
+$ sudo find /usr/ -type f -name "popt.h"
+/usr/include/popt.h
+```
+The `find` command locates `popt.h` so the libpopt dev package is successfully installed. However, this package installation set a symbolic link in place that hides this CentOS Linux distribution's version of `libpopt.so` library. I will remove that link and redefine it to refer to the correct `popt` shared library:
+```shell
+$ sudo rm -f /usr/lib/libpopt.so
+
+$ sudo ln -s /usr/lib64/libpopt.so.0.0.0 /usr/lib/libpopt.so
+```
+
+#### Clone Spartan source code from github
+
+I will first create a directory to put development projects:
+```shell
+$ mkdir ./projects
+
+$ cd ./projects
+```
+Now use `git` to clone the Spartan project (using the `master` branch):
+```shell
+$ git clone https://github.com/tideworks/spartan-launcher.git
+
+$ cd ./spartan-launcher/
+```
+
+#### Build Spartan using Maven
+
+It's now time to build Spartan - I specify the `install` goal here so that the Spartan `.jar` library will be put into the local Maven repository (this will be necessary for building the Spartan example programs or any Java program that uses Spartan):
+```shell
+$ mvn install
+```
+The first time the project is built, Maven will download a lot of plugins that it requires. Once the build finishes it will output this final banner:
+```shell
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time: 14.006 s
+[INFO] Finished at: 2019-01-06T01:16:28+00:00
+[INFO] Final Memory: 18M/43M
+[INFO] ------------------------------------------------------------------------
+```
+It's worthwhile to see the contrast by running a clean build again:
+```shell
+$ mvn clean install
+```
+Maven no longer needs to download any plugins so the build logging is that of just the Spartan project itself.
+
+Now use the `unzip` command to see the contents of the `.zip` file build artifact:
+```shell
+$ unzip -l target/Spartan-1.0-SNAPSHOT-bundle.zip
+Archive:  target/Spartan-1.0-SNAPSHOT-bundle.zip
+  Length      Date    Time    Name
+---------  ---------- -----   ----
+    65055  01-06-2019 01:34   Spartan.jar
+      193  01-06-2019 01:34   config.ini
+      174  01-06-2019 01:34   test
+     9171  01-06-2019 00:59   APACHE20-LICENSE.txt
+     1510  01-06-2019 00:59   BSD-LICENSE.txt
+     1503  01-06-2019 00:59   MIT-LICENSE.txt
+  1596072  01-06-2019 01:34   libspartan-shared.so
+     6296  01-06-2019 01:34   spartan
+   750581  01-06-2019 01:02   javassist-3.20.0-GA.jar
+---------                     -------
+  2430555                     9 files
+```
+
+#### Build Spartan example programs
+
+Now change directory into the `./examples/` folder and list the subdirectories there:
+```shell
+$ cd ./examples/
+
+$ ls -ld */
+drwxrwxr-x. 4 buildr buildr 83 Jan  6 00:59 spartan-cfg-ex/
+drwxrwxr-x. 3 buildr buildr 71 Jan  6 00:59 spartan-ex/
+drwxrwxr-x. 3 buildr buildr 71 Jan  6 00:59 spartan-react-ex/
+drwxrwxr-x. 3 buildr buildr 71 Jan  6 00:59 spartan-watchdog-ex/
+```
+Change directory into `./spartan-ex/` and build it:
+```shell
+$ mvn package
+
+$ ls -l target/spartan-ex*.jar
+-rw-rw-r--. 1 buildr buildr 9125 Jan  6 01:40 target/spartan-ex-1.0-SNAPSHOT.jar
+```
+Change directory into `../spartan-cfg-ex/` and build it:
+```shell
+$ cd ../spartan-cfg-ex/
+
+$ mvn package
+
+$ ls -l target/spartan-cfg*.jar
+-rw-rw-r--. 1 buildr buildr 16542 Jan  6 01:44 target/spartan-cfg-ex-1.0-SNAPSHOT.jar
+```
+Change directory to `../spartan-watchdog-ex/` and build it:
+```shell
+$ cd ../spartan-watchdog-ex/
+
+$ mvn package
+
+$ ls -l target/spartan-watch*.jar
+-rw-rw-r--. 1 buildr buildr 10566 Jan  6 01:46 target/spartan-watchdog-ex-1.0-SNAPSHOT.jar
+```
+Lastly change directory to `../spartan-react-ex/` and build it:
+```shell
+$ cd ../spartan-react-ex/
+
+$ mvn package
+
+$ ls -l target/spartan-react*.jar
+-rw-rw-r--. 1 buildr buildr 12440 Jan  6 01:57 target/spartan-react-ex-1.0-SNAPSHOT.jar
+```
+
+That completes the tutorial on building Spartan and the example programs. Now proceed to the Appendix on running the example programs.
+
+### Appendix 3: Running the Spartan example programs
+
+TODO - fill this section in
