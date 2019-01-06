@@ -464,14 +464,14 @@ We will illustrate using **spartan-cfg-ex**. We will place all the programs disc
 Install `spartan` into an `/opt/` sub-directory:
 
 ```shell
--rw-r--r-- 1 buildr buildr    9171 Dec  2 16:27 /opt/spartan/APACHE20-LICENSE.txt
--rw-r--r-- 1 buildr buildr    1510 Dec  2 16:27 /opt/spartan/BSD-LICENSE.txt
--rw-r--r-- 1 buildr buildr    1503 Dec  2 17:48 /opt/spartan/MIT-LICENSE.txt
--rw-r--r-- 1 buildr buildr     193 Dec 26 13:42 /opt/spartan/config.ini
--rw-r--r-- 1 buildr buildr  750581 Apr  9  2016 /opt/spartan/javassist-3.20.0-GA.jar
--rw-r--r-- 1 buildr buildr   62687 Jan  1 13:37 /opt/spartan/Spartan.jar
--rwxr-xr-- 1 buildr buildr 1584346 Dec 30 18:25 /opt/spartan/libspartan-shared.so
--rwxr-xr-- 1 buildr buildr    6280 Dec 30 18:25 /opt/spartan/spartan
+-rw-r--r-- 1 spartan spartan    9171 Dec  2 16:27 /opt/spartan/APACHE20-LICENSE.txt
+-rw-r--r-- 1 spartan spartan    1510 Dec  2 16:27 /opt/spartan/BSD-LICENSE.txt
+-rw-r--r-- 1 spartan spartan    1503 Dec  2 17:48 /opt/spartan/MIT-LICENSE.txt
+-rw-r--r-- 1 spartan spartan     193 Dec 26 13:42 /opt/spartan/config.ini
+-rw-r--r-- 1 spartan spartan  750581 Apr  9  2016 /opt/spartan/javassist-3.20.0-GA.jar
+-rw-r--r-- 1 spartan spartan   62687 Jan  1 13:37 /opt/spartan/Spartan.jar
+-rwxr-xr-- 1 spartan spartan 1584346 Dec 30 18:25 /opt/spartan/libspartan-shared.so
+-rwxr-xr-- 1 spartan spartan    6280 Dec 30 18:25 /opt/spartan/spartan
 ```
 
 For ease of running the example programs, execution permission is set for all users (normally it would be preferable if only owning user and group are granted execution permission):
@@ -731,7 +731,8 @@ Or the subscribers could be chained via loop iteration - here we see subscribers
         .onNext((outStrm,  subscription) -> copyWithClose(outStrm, outputFileStream, subscription));
   }
 
-  assert subscriber != null;
+  if (subscriber == null) return; // list of files was empty, so was nothing to do
+
   final FuturesCompletion futures = subscriber.start();
 
   int count = futures.count();
