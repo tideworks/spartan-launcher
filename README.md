@@ -829,7 +829,7 @@ $ which wget
 /usr/bin/which: no wget in (/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/buildr/bin)
 $ which git
 /usr/bin/which: no git in (/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin:/home/buildr/bin)
-$ which $ which sha256sum
+$ which sha256sum
 /usr/bin/sha256sum
 ```
 
@@ -893,7 +893,7 @@ Which results in this extracted directory:
 $ ls -ld /usr/local/java/jdk8u192-b12
 drwxrwxr-x 9 buildr buildr 4096 Oct 31 19:41 /usr/local/java/jdk8u192-b12
 ```
-I then change the ownership to `root`:
+I then change its ownership to `root`:
 ```shell
 $ sudo chown root:root -R /usr/local/java/jdk8u192-b12
 
@@ -919,6 +919,10 @@ It will now be necessary to exit from the `buildr` user session, then exit the `
 ```shell
 $ exit
 
+$ exit
+```
+Reconnect `ssh` session to VM and then get back into `buildr` command prompt:
+```shell
 $ su buildr
 
 $ cd ~
@@ -937,7 +941,7 @@ $ echo $JDK8_BIN
 /usr/local/java/jdk8u192-b12/bin
 ```
 
-I will now create symbolic links for executing `java` and `javac`:
+I will now create symbolic links for executing `java`, `javac`, and `javah`:
 ```shell
 $ sudo ln -s $JDK8_BIN/java /usr/local/bin/java
 
@@ -945,7 +949,7 @@ $ sudo ln -s $JDK8_BIN/javac /usr/local/bin/javac
 
 $ sudo ln -s $JDK8_BIN/javah /usr/local/bin/javah
 ```
-And then invoke `java` and `javac` to verify that they're found on PATH and their versions are as expected:
+And then invoke `java`, `javac`, and `javah` to verify that they're found on PATH and their versions are as expected:
 ```shell
 $ java -version
 openjdk version "1.8.0_192"
@@ -988,7 +992,7 @@ Maven home: /usr/local/maven/apache-maven-3.3.9
 Java version: 1.8.0_192, vendor: Oracle Corporation
 Java home: /usr/local/java/jdk8u192-b12/jre
 Default locale: en_US, platform encoding: UTF-8
-OS name: "linux", version: "2.6.32-696.30.1.el6.x86_64", arch: "amd64", family: "unix"
+OS name: "linux", version: "3.10.0-862.2.3.el7.x86_64", arch: "amd64", family: "unix"
 ```
 
 ##### install gcc/g++ compiler
