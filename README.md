@@ -71,7 +71,7 @@ From Wikipedia: [Fork (system call)](https://en.wikipedia.org/wiki/Fork_%28syste
     - [Clone Spartan source code from github](#clone-spartan-source-code-from-github)
     - [Build Spartan using Maven](#build-spartan-using-maven)
     - [Build Spartan example programs](#build-spartan-example-programs)
-  - [Appendix 3: Running the Spartan example programs](#appendix-3-running-the-spartan-example-programs)
+  - [Appendix 3: Running the Spartan example program `spartan-ex`](#appendix-3-running-the-spartan-example-program-spartan-ex)
 
 <!-- END doctoc generated TOC please keep comment here to allow auto update -->
 
@@ -1119,12 +1119,14 @@ Change directory into `../spartan-cfg-ex/` and build it:
 ```shell
 $ cd ../spartan-cfg-ex/
 
-$ mvn package
+$ mvn install
 
 $ ls -l target/spartan-cfg*.jar
 -rw-rw-r--. 1 buildr buildr 16542 Jan  6 01:44 target/spartan-cfg-ex-1.0-SNAPSHOT.jar
 ```
-Change directory to `../spartan-watchdog-ex/` and build it:
+The `spartan-cfg-ex` project needed to be built with the Maven `install` goal so that it will download a library dependency that this program will require later when it is ran.
+
+Proceed to the next one, change directory to `../spartan-watchdog-ex/` and build it:
 ```shell
 $ cd ../spartan-watchdog-ex/
 
@@ -1143,8 +1145,201 @@ $ ls -l target/spartan-react*.jar
 -rw-rw-r--. 1 buildr buildr 12440 Jan  6 01:57 target/spartan-react-ex-1.0-SNAPSHOT.jar
 ```
 
-That completes the tutorial on building Spartan and the example programs. Now proceed to the Appendix on running the example programs.
+That completes the tutorial on building Spartan and the example programs. Now proceed to the Appendix on running an example program.
 
-### Appendix 3: Running the Spartan example programs
+### Appendix 3: Running the Spartan example program `spartan-ex`
 
-TODO - fill this section in
+As a prerequiste I will install GNU Screen:
+
+`$ sudo yum -y install screen`
+
+I will now proceed to the example program `spartan-ex`, which if one has gone through the Appendix 2 tutorial, will be at this directory path:
+
+`$ cd ~/projects/spartan-launcher/examples/spartan-ex`
+
+Now cat contents of `config.ini` file and verify the `.jar` files specified for the classpath indeed exist:
+```shell
+$ cat config.ini
+[JvmSettings]
+CommandLineArgs=-server -Xms40m -Xmx128m -Djava.class.path="../../target/Spartan-1.0-SNAPSHOT.jar:./target/spartan-ex-1.0-SNAPSHOT.jar" -Djava.library.path=.
+[ChildProcessSettings]
+ChildProcessMaxCount=30
+[LoggingSettings]
+LoggingLevel=INFO
+
+$ ls -l ../../target/Spartan-1.0-SNAPSHOT.jar ./target/spartan-ex-1.0-SNAPSHOT.jar
+-rw-rw-r--. 1 buildr buildr 65055 Jan  6 01:34 ../../target/Spartan-1.0-SNAPSHOT.jar
+-rw-rw-r--. 1 buildr buildr  9125 Jan  6 01:40 ./target/spartan-ex-1.0-SNAPSHOT.jar
+```
+Now execute the shell script to create the program's symbolic link that it will be executed by:
+
+`$ ./mk-app-lnk.sh`
+
+Briefly I will now try it out:
+```shell
+$ ./tst-spartan-ex -service
+tst-spartan-ex: INFO: starting process 12722
+tst-spartan-ex: INFO: started as a service
+tst-spartan-ex: INFO: hello world - supervisor service has started!
+```
+The service has come up and is running, but I will now exit it by pressing Control-C:
+```shell
+^Ctst-spartan-ex: INFO: exiting normally
+tst-spartan-ex: INFO: process 12723 exiting normally
+tst-spartan-ex: INFO: process 12722 exiting normally
+```
+I will now grep the program's source code to see what Spartan sub-commands that it supports:
+```shell
+$ find src/ -type f -name "*.java"|xargs -r egrep -n '\@.*Command\('
+166:  @SupervisorCommand("GENFIB")
+238:  @SupervisorCommand("INVOKECHILDCMD")
+343:  @ChildWorkerCommand(cmd="GENETL", jvmArgs={"-Xms48m", "-Xmx128m"})
+385:  @ChildWorkerCommand(cmd="CDCETL", jvmArgs={"-Xms48m", "-Xmx128m"})
+```
+It is now time to invoke `GNU screen` and split the console into two panes:
+
+`$ screen`
+
+I enter `Control-A, shift-s` to split the screen into two panes. Then I enter `Control-A,tab` to move the cursor from the current pane to the next one, enter `Control-A,c` to bring up a shell command prompt.
+
+I now have two panes each with an active command shell prompt. I can continue to use `Control-A,tab` to move the cursor from one pane to the other.
+
+In one pane I will now start the example program as a service again - but I will execute it detached in background as services are meant to do:
+```shell
+$ nohup ./tst-spartan-ex -service &
+[1] 12827
+[buildr@centos75-1gb spartan-ex]$ nohup: ignoring input and appending output to ‘nohup.out’
+
+$ jobs -l
+[1]+ 12827 Running                 nohup ./tst-spartan-ex -service &
+
+$ ps -C tst-spartan-ex -Fww
+UID        PID  PPID  C    SZ   RSS PSR STIME TTY          TIME CMD
+buildr   12827 12623  0 29687  4828   0 03:57 pts/2    00:00:00 ./tst-spartan-ex -service
+buildr   12828 12827  0 537035 35244  0 03:57 pts/2    00:00:00 ./tst-spartan-ex -service
+```
+I have confirmed that it is indeed executing in background (the launcher process and the supervisor process). I will now use the `tail` tool to follow the service's logging to `stdout`|`stderr`:
+```shell
+$ tail -F nohup.out
+tst-spartan-ex: INFO: starting process 12827
+tst-spartan-ex: INFO: started as a service
+tst-spartan-ex: INFO: hello world - supervisor service has started!
+```
+**NOTE:** Realistically, the `stdout`|`stderr` logging output of the service would be re-directed to `/dev/null` in a typical Linux service script wrapper. This is necessary because there is no file rotation, aging, and then deletion policy management of this manner of logging. It is just good for intial diagnostics to confirm operation or sometimes to debug problems. A real world Java service would rely on say, logback or log4j logging libraries.
+
+I now use `Control-A,tab` to move the cursor to the other pane's command prompt and enter the `status` sub command:
+```shell
+$ ./tst-spartan-ex status
+tst-spartan-ex: INFO: starting process 12890
+
+    *** timestamp ***    |  *** pid *** | *** command-line ***
+
+No child processes currently active
+./tst-spartan-ex
+Supervisor JVM:
+  total memory:           38 MB
+   free memory:           31 MB
+   used memory:            7 MB
+    max memory:          123 MB
+
+tst-spartan-ex: INFO: process 12890 exiting normally
+```
+And now I will enter the supervisor sub command `genfib` with an argument of 10000:
+```shell
+$ ./tst-spartan-ex genfib 10000
+tst-spartan-ex: INFO: starting process 12904
+>> invoked spartan_example.App.generateFibonacciSequence(\"genfib" "10000\")
+0.0
+1.0
+1.0
+2.0
+3.0
+5.0
+8.0
+13.0
+21.0
+34.0
+55.0
+89.0
+144.0
+233.0
+377.0
+610.0
+987.0
+1597.0
+2584.0
+4181.0
+6765.0
+
+generated 21 values
+tst-spartan-ex: INFO: process 12904 exiting normally
+```
+I will now execute the supervisor command `invokechildcmd` so as to have the supervisor process use `Spartan.invokeCommand()` API to initiate a worker child process that it handles the output of (in this example program it merely echos the output back to its invoker):
+```shell
+$ ./tst-spartan-ex invokechildcmd cdcetl some.json.gz
+tst-spartan-ex: INFO: starting process 13009
+>> invoked spartan_example.App.invokeChildCmd(\"invokechildcmd" "cdcetl" "some.json.gz\")
+>> invoked spartan_example.App.doCdcEtlProcessing(\"cdcetl" "some.json.gz\")
+>> invoked spartan.test.invokeGenerateDummyTestOutput(\"some.json.gz\")
+DEBUG: spartan.test.generateDummyTestOutput("some.json.gz")
+DEBUG: test message #0 - duration 945 ms
+DEBUG: test message #1 - duration 383 ms
+DEBUG: test message #2 - duration 615 ms
+DEBUG: test message #3 - duration 889 ms
+DEBUG: test message #4 - duration 826 ms
+DEBUG: test message #5 - duration 593 ms
+DEBUG: test message #6 - duration 179 ms
+DEBUG: test message #7 - duration 767 ms
+DEBUG: test message #8 - duration 535 ms
+DEBUG: test message #9 - duration 974 ms
+DEBUG: test message #10 - duration 987 ms
+DEBUG: test message #11 - duration 228 ms
+DEBUG: test message #12 - duration 530 ms
+DEBUG: test message #13 - duration 17 ms
+DEBUG: test message #14 - duration 64 ms
+DEBUG: test message #15 - duration 788 ms
+DEBUG: test message #16 - duration 383 ms
+DEBUG: test message #17 - duration 173 ms
+DEBUG: test message #18 - duration 642 ms
+DEBUG: test message #19 - duration 651 ms
+DEBUG: test message #20 - duration 183 ms
+DEBUG: test message #21 - duration 129 ms
+DEBUG: test message #22 - duration 483 ms
+DEBUG: test message #23 - duration 523 ms
+DEBUG: test message #24 - duration 730 ms
+DEBUG: test message #25 - duration 566 ms
+DEBUG: test message #26 - duration 763 ms
+DEBUG: test message #27 - duration 595 ms
+DEBUG: test message #28 - duration 980 ms
+DEBUG: test message #29 - duration 854 ms
+tst-spartan-ex: INFO: process 13009 exiting normally
+```
+
+**NOTE:** The example program `spartan-watchdog-ex` illustrates the typical case of where the supervisor initates and then manages the operation and output of some worker child process.
+
+I will conclude this tutorial by stopping the service:
+```shell
+$ ./tst-spartan-ex stop
+tst-spartan-ex: INFO: starting process 13049
+tst-spartan-ex: INFO: process 13049 exiting normally
+```
+It will be seen that the `tail` of the service logging output shows that it exited (use the `ps` command to verify):
+```shell
+tst-spartan-ex: INFO: exiting normally
+tst-spartan-ex: INFO: process 12828 exiting normally
+tst-spartan-ex: INFO: process 12827 exiting normally
+```
+
+That concludes the tutorial for how to run the Spartan example programs. They all are set up in a similar manner. Remember to grep the source code as shown above to find out what Spartan sub commands a program implements.
+
+**Some additional tips**
+
+There is a special case that needs to be mentioned in respect to the `spartan-cfg-ex` example program.
+
+When building this example program it was necessary to build it with the Maven `install` goal in order to download and install a library dependency that it requires when running. Additionally, this example service must be executed in a way to where the `HOME` environment variable is defined. Here we see `bash` being utlized to define `HOME` in the same context that the service then begins to excute in (typically this is dealt with in a service wrapper script):
+
+`$ nohup bash -c "HOME=${PWD}/target; ./tst-spartan-cfg-ex -service" &`
+
+It will then be able to locate the `config.properties` file, which it uses as part of its operation in being an example of how to convey configuration state from the service supervisor to an invoked worker child process. One should take a look at the source code, as it's all in a single file and relatively brief.
+
+Lastly, for the `spartan-react-ex` example program to be interesting, it needs to be given a subdirectory full of `.gz` compressed files that it then can have its supervisor command, `mass_uncompress`, invoked on, giving it the directory path as an argument. The sub command's implementation will make use of many worker child processes to uncompress these files in a parallel processing manner (which can be throttled by what manner of Java executor the subscription is initialized with). It's purpose is to illustrate how to program with the `spartan.fstreams.Flow` class and its interfaces - not to be an example of a realisticly useful program. The Flow subscriber approach has definite applicability in big data processing pipeline scenarios, though. Think in terms of sharded data where a worker child process handles a particular shard. The supervisor is responsible for sharding, dispatching, etc. One could constrain the executor to the arity of the available CPUs. Another rich area for using this Flow subscriber approach is in processing workflow job networks (if only Apache NiFi had been written to a Spartan architecture...).
