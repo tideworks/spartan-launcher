@@ -4,7 +4,7 @@
   <groupId>com.tideworks.test</groupId>
   <artifactId>syslogger-test</artifactId>
   <packaging>jar</packaging>
-  <version>1.0-SNAPSHOT</version>
+  <version>1.0.0</version>
   <name>syslogger-test</name>
   <url>http://maven.apache.org</url>
 
@@ -12,7 +12,7 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <slf4j.version>1.7.7</slf4j.version>
     <logback.version>1.1.2</logback.version>
-    <spartan.version>0.8.0</spartan.version>
+    <spartan.version>1.0.0</spartan.version>
  </properties>
 
   <build>
