@@ -19,6 +19,8 @@ limitations under the License.
 #ifndef __PATH_CONCAT_H__
 #define __PATH_CONCAT_H__
 
+#include <string>
+
 std::string path_concat(const char * const str1, const char * const str2);
 
 const char kPathSeparator =
