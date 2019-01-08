@@ -4,7 +4,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <cxxabi.h>
-#include "spartan_io_Files.h"
+#include "spartan_util_io_Files.h"
 #include "string-view.h"
 #include "findfiles.h"
 #include "log.h"
@@ -25,7 +25,7 @@ DECL_EXCEPTION(fsync_dir)
  * Method:    fsyncDirectory
  * Signature: (Ljava/lang/String;)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_io_Files_fsyncDirectory(JNIEnv *env, jclass /*cls*/, jstring dir) {
+extern "C" JNIEXPORT void JNICALL Java_spartan_util_io_Files_fsyncDirectory(JNIEnv *env, jclass /*cls*/, jstring dir) {
   try {
     assert(dir != nullptr);
 
@@ -90,13 +90,13 @@ extern "C" JNIEXPORT void JNICALL Java_spartan_io_Files_fsyncDirectory(JNIEnv *e
 }
 
 /*
- * Class:     spartan_io_Files
+ * Class:     spartan_util_io_Files
  * Method:    walk_file_tree
- * Signature: (CIZLjava/lang/String;Ljava/nio/file/FileVisitor;)V
+ * Signature: (CIZLjava/nio/file/Path;Lspartan/util/io/Files/WalkFileTreeVisitor;)V
  */
 extern "C" JNIEXPORT void JNICALL
-Java_spartan_io_Files_walk_1file_1tree(JNIEnv *env, jobject thisObj, jchar separator_char, jint maxdepth,
-                                       jboolean follow_links, jobject start_dir, jobject visitor)
+Java_spartan_util_io_Files_walk_1file_1tree(JNIEnv *env, jobject thisObj, jchar separator_char, jint maxdepth,
+                                            jboolean follow_links, jobject start_dir, jobject visitor)
 {
   find_files ff{ static_cast<char>(separator_char), maxdepth, follow_links != JNI_FALSE };
 

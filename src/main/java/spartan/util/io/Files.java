@@ -20,7 +20,7 @@ public final class Files {
   static {
     isPosix = FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
     if (isPosix) {
-      System.loadLibrary("walk-file-tree");
+      System.loadLibrary("spartan-shared");
       walkFileTreeCB = Files::walkFileTreeInvokeNative;
     } else {
       walkFileTreeCB = java.nio.file.Files::walkFileTree;
