@@ -18,6 +18,18 @@ InvokeResponseEx Spartan.invokeCommandEx(String... args) { ... }
 ```
 see: [React-style Spartan Flow class and interfaces, and invokeCommandEx()](#react-style-spartan-flow-class-and-interfaces-and-invokecommandex)
 
+**ALSO NEW!** Spartan improved for high performance version of `java.nio.file.Files.walkFileTree(..) { ... }`
+```java
+/* class */
+spartan.util.io.Files
+
+/* static methods */
+Path walkFileTree(Path start, FileVisitor<? super Path> visitor) throws IOException { ... }
+Path walkFileTree(Path start, Set<FileVisitOption> options, int maxDepth, FileVisitor<? super Path> visitor) throws IOException { ... }
+void fsyncDirectory(Path dir) throws IOException { ... }
+```
+see: [Appendix 1: Spartan helper classes and methods](#appendix-1-spartan-helper-classes-and-methods)
+
 # spartan "forking" java program launcher
 
 From Wikipedia: [Fork (system call)](https://en.wikipedia.org/wiki/Fork_%28system_call%29)
@@ -791,11 +803,19 @@ However, for the Java language, where this manner of programming now becomes so 
 - `spartan.SpartanBase.commandForwarder()` methods - for reducing boilerplate coding at sub command entry points
 - `spartan.Spartan.isFirstInstance()` method - establish fence around singleton child sub-commands
 
+- \*`spartan.util.io.Files.walkFileTree()` methods - use to traverse directory trees with a visitor (much higher performing that Java SE version)
+- `spartan.util.io.Files.fsyncDirectory()` method - sync changes to a directory to persistent storage
+
 #### helper classes
 
+- \*`spartan.util.io.Files` class - provides an alternative implementation of the Java SE `java.nio.file.Files.walkFileTree()` methods (for much higher performance)
 - `spartan.util.io.ReadLine` class - zero to low garbage text stream reading
 - `spartan.util.io.ByteArrayOutputStream` class - allows fully owning and accessing its internal byte array buffer
 - `spartan.SpartanSysLogAppender` class - for use with logback/slf4j-based Java application logging (allows ERROR and FATAL level to be *syslogged*)
+
+\* The Spartan `spartan.util.io.Files.walkFileTree()` methods avoid calling syscall to `lstat()` or `stat()` per every node visited. This definitely matters when the number of files mount into the hundreds or thousands. Most Linux file systems return sufficient information when iterating using `dirread()` such that it is not necessary to call `lstat()` to find out if the visited node is a directory, regular file, symbolic link (or other). If a file system doesn't provide the node type information, though, then the call to `lstat()` is made (so the call works regardless).
+
+The Spartan `walkFileTree()` methods also do not return `java.nio.file.Path` objects of the usual sort. For one, it is just an implementation of the `Path` interface, and two, it is a re-used object. If it is needed to retain a `Path` object returned to a `walkFileTree()` callback, then a new `Path` object should be instantiated from the `toString()` result of the Spartan `Path` object.
 
 ### Appendix 2: HowTo Guide - Downloading Source Code and Building Spartan - step-by-step
 
