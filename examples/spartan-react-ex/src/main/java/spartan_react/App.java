@@ -38,7 +38,8 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.zip.GZIPInputStream;
 
-import static java.nio.file.Files.walkFileTree;
+//import static java.nio.file.Files.walkFileTree;
+import static spartan.util.io.Files.walkFileTree;
 import static java.nio.file.StandardOpenOption.CREATE;
 import static java.nio.file.StandardOpenOption.TRUNCATE_EXISTING;
 import static java.util.stream.Collectors.toList;
@@ -149,7 +150,7 @@ public class App extends SpartanBase {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
               if (file.getFileName().toString().endsWith(".gz")) {
-                gzFilesList.add(file);
+                gzFilesList.add(dirPath.getFileSystem().getPath(file.toString()));
                 outStream.println(file);
               }
               return FileVisitResult.CONTINUE;
