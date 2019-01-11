@@ -16,6 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
@@ -111,18 +112,32 @@ static const char* get_executable_dir() noexcept {
   return ".";
 }
 
-static const string_view s_java_classpath{ get_env_var("CLASSPATH") }; // optional
-static const string_view s_java_home_path{ get_env_var("JAVA_HOME", true) }; // must be defined
 static const string_view s_executable_dir{ get_executable_dir() };
 static string_view s_progpath;
 static string_view s_progname;
 static string_view s_jlauncher_queue_name;
 static string_view s_jsupervisor_queue_name;
-const char * java_classpath() { return s_java_classpath.c_str(); }
-const char * java_home_path() { return s_java_home_path.c_str(); }
-const char * executable_dir() { return s_executable_dir.c_str(); }
-const char * progpath() { return s_progpath.c_str(); }
-const char * progname() { return s_progname.c_str(); }
+
+static std::atomic_bool s_classpath_flag{false};
+static std::atomic_bool s_java_home_flag{false};
+static string_view s_java_classpath{};
+static string_view s_java_home_path{};
+
+const char* java_classpath() {
+	if (!s_classpath_flag.exchange(true)) {
+		s_java_classpath = get_env_var("CLASSPATH"); // optional
+	}
+	return s_java_classpath.c_str();
+}
+const char* java_home_path() {
+	if (!s_java_home_flag.exchange(true)) {
+		s_java_home_path = get_env_var("JAVA_HOME", true); // must be defined
+	}
+	return s_java_home_path.c_str();
+}
+const char* executable_dir() { return s_executable_dir.c_str(); }
+const char* progpath() { return s_progpath.c_str(); }
+const char* progname() { return s_progname.c_str(); }
 
 using processor_result_t = std::tuple<bool,int>;
 using send_mq_msg_cb_t = std::function<int (const char * const msg)>;
