@@ -1,3 +1,5 @@
+**Update on roadmap item:** Very good progress being made on Spartan support of Java Modularity (introduced in Java 9) so come February 2019 timeframe Spartan will be fully supporting Java 9, 10, 11 and the ability to run as Java modules!
+
 **NEW!** Spartan Flow react-style class and interfaces are here! And the new `Spartan.invokeCommandEx()` API that powers them:
 ```java
 /* class */
