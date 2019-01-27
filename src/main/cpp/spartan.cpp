@@ -47,6 +47,7 @@ limitations under the License.
 #include "open-anon-pipes.h"
 #include "read-on-ready.h"
 #include "echo-streams.h"
+#include "jvm-pre-init.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
@@ -54,6 +55,7 @@ limitations under the License.
 using namespace logger;
 using namespace launch_program;
 using namespace read_on_ready;
+using namespace jvm_pre_init;
 
 static const size_t MSG_BUF_SZ = 4096;
 static const string_view STOP_CMD{ "--STOP" };
@@ -549,7 +551,17 @@ inline int jni_detach_thread(JavaVM * const jvmp, JNIEnv * const envp) {
   return jvmp->DetachCurrentThread() != JNI_OK ? EXIT_FAILURE : ret;
 }
 
-// utility function that invokes a Java method
+/**
+* Is the core utility function that invokes a Java method.
+*
+* @param jvmp Java JVM handle
+* @param method_descriptor data structure that describes info for the Java method to be invoked
+* @param fds_array any anonymous pipe field descriptors to use for streams passed to the invoked method
+* @param argc number of command line arguments
+* @param argv array of command line argument strings
+* @param pss the Spartan internal session state
+* @return status code outcome of the call
+*/
 static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &method_descriptor,
                               std::array<fd_wrapper_sp_t, 3> &&fds_array,
                               int argc, char **argv, const sessionState *pss)
@@ -576,6 +588,9 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
     }(class_name); // get the fully qualified class/method name into two separate strings
 
     JNIEnv * const env = env_sp.get();
+
+    // set system class loader on current thread context
+    jvm_pre_init_ctx{env, class_name, method_name}.set_thread_class_loader_context();
 
     auto const defer_jobj = [env](jobject p) {
       if (p != nullptr) {
@@ -645,71 +660,27 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
 
     log(LL::DEBUG, "%s() Spartan object instance is %s", __func__, mObj == nullptr ? "null" : "non-null");
 
-    // set system class loader on current thread context
-    {
-      // save state of these local variables (may be referenced in caught exception handling code below)
-      const char * const class_name_sav  = class_name;
-      const char * const method_name_sav = method_name;
-
-      class_name = "java/lang/ClassLoader";
-      jclass const clsLdr_cls = env->FindClass(class_name);
-      if (clsLdr_cls == nullptr) throw 3;
-      method_name = "getSystemClassLoader";
-      jmethodID const getSysClsLdr = env->GetStaticMethodID(clsLdr_cls, method_name, "()Ljava/lang/ClassLoader;");
-      if (getSysClsLdr == nullptr) throw 4;
-
-      // get system class loader
-      defer_jobj_t spClsLdrObj(env->CallStaticObjectMethod(clsLdr_cls, getSysClsLdr), defer_jobj);
-
-      class_name = "java/lang/Thread";
-      jclass const thrd_cls = env->FindClass(class_name);
-      if (thrd_cls == nullptr) throw 3;
-      method_name = "currentThread";
-      jmethodID const currThrd = env->GetStaticMethodID(thrd_cls, method_name, "()Ljava/lang/Thread;");
-      if (currThrd == nullptr) throw 4;
-
-      // get current thread object
-      defer_jobj_t spCurrThrdObj(env->CallStaticObjectMethod(thrd_cls, currThrd), defer_jobj);
-
-      method_name = "setContextClassLoader";
-      jmethodID const setCntxClsLdr = env->GetMethodID(thrd_cls, method_name, "(Ljava/lang/ClassLoader;)V");
-      if (setCntxClsLdr == nullptr) throw 4;
-
-      // now set the system class loader on the current thread object as the thread's context class loader
-      env->CallVoidMethod(spCurrThrdObj.get(), setCntxClsLdr, spClsLdrObj.get());
-
-      // restore state of these local variables
-      class_name  = class_name_sav;
-      method_name = method_name_sav;
-    }
-
     try {
       bool was_exception_raised = false;
       auto inner_deref_jargs_array_sp = std::move(spJargs_array);
 
       const auto which_method = method_descriptor.which_method();
+
       if (which_method == WM::GET_CMD_DISPATCH_INFO) {
-        jclass const jcls = env->FindClass(class_name);
-        if (jcls == nullptr) throw 3;
-
-        jmethodID const get_cmd_dispatch_info = env->GetStaticMethodID(jcls, method_name, method_descriptor.desc_str());
-        if (get_cmd_dispatch_info == nullptr) throw 4;
-
-        sessionState ss;
-        assert(pss != nullptr); // for this code logic flow, pss should not be null
-        if (pss != nullptr) {
-          ss.clone_info_part(*pss); // info contents of *pss copied onto ss
+        if (pss == nullptr) { // for this code logic flow, pss should not be null
+          std::string errmsg{"sessionState *pss pointer passed into "};
+          errmsg += __FUNCTION__;
+          errmsg += "() should never be null for this code logic flow";
+          __assert(errmsg.c_str(), __FILE__, __LINE__);
         }
 
-        log(LL::DEBUG, "%s() invoking static method \"%s\"", __func__, fullMethodName);
-        auto const ser_cmd_dispatch_info = env->CallStaticObjectMethod(jcls, get_cmd_dispatch_info);
-        was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
+        sessionState ss{};
+        ss.clone_info_part(*pss); // info contents of de-referenced *pss copied onto ss
 
-        if (!was_exception_raised) {
-          cmd_dsp::CmdDispatchInfoProcessor processCDI(env, class_name, method_name, jcls, ss);
-          auto pshm = processCDI.process_initial_cmd_dispatch_info(reinterpret_cast<jbyteArray>(ser_cmd_dispatch_info));
-          s_shm_allocator_sp.reset(pshm);
-        }
+        // determine shared memory JVM context state and initialize Java JVM (necessary for if in modularity mode)
+        auto rtn = jvm_pre_init_ctx{env, class_name, method_name}.pre_init_for_supervisor_jvm(method_descriptor, ss);
+        s_shm_allocator_sp.reset(std::get<0>(rtn));
+        was_exception_raised = std::get<1>(rtn);
       } else if (which_method == WM::MAIN) {
         // invoke the static method main() entry point
         const char *const class_name_sav = class_name;
@@ -717,7 +688,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
         jclass const spartanbase_cls = env->FindClass(class_name);
         if (spartanbase_cls == nullptr) throw 3;
         jmethodID const spartanbase_main = env->GetStaticMethodID(spartanbase_cls, method_name,
-                                                                  "(Ljava/lang/String;ILjava/lang/reflect/Method;[Ljava/lang/String;)V");
+            "(Ljava/lang/String;ILjava/lang/reflect/Method;[Ljava/lang/String;)V");
         if (spartanbase_main == nullptr) throw 4;
         defer_jobj_t spMain_meth(env->ToReflectedMethod(cls, mid, JNI_TRUE), defer_jobj);
         class_name = class_name_sav;
@@ -734,8 +705,11 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
       } else {
         // invoke an instance method (unless is WM::CHILD_DO_CMD, which is static)
         switch (which_method) {
+          case WM::CHILD_DO_CMD: {
+            // retrieve shared memory JVM context state and initialize Java JVM (necessary for if in modularity mode)
+            jvm_pre_init_ctx{env, class_name, method_name}.pre_init_for_child_worker_jvm();
+          }
           case WM::GET_STATUS:
-          case WM::CHILD_DO_CMD:
           case WM::SUPERVISOR_DO_CMD: {
             log(LL::DEBUG, "%s() prepare to invoke method taking response stream argument...", __func__);
 
@@ -1116,10 +1090,8 @@ static int supervisor(int argc, char **argv, sessionState& session) {
       auto const invoke_jvm_entrypoint = [&jvm_exit, &session, argc, argv](std::promise<void> prom_rref) {
 
         auto const action = [&prom_rref, argc, argv](sessionState &session_param, JavaVM *const jvm) -> int {
-          methodDescriptor obtainSerializedAnnotationInfo(
-                                          "spartan/CommandDispatchInfo/obtainSerializedSysPropertiesAndAnnotationInfo",
-                                          "()[B",
-                                          true, WM::GET_CMD_DISPATCH_INFO);
+          methodDescriptor obtainSerializedAnnotationInfo =
+              jvm_pre_init_ctx::make_obtainSerializedAnnotationInfo_descriptor();
           auto rc = invoke_java_method(jvm, obtainSerializedAnnotationInfo, argc, argv, &session_param);
           shm_allocator_sp_t sp_shm_alloc = std::move(s_shm_allocator_sp);
           if (rc != EXIT_SUCCESS) {

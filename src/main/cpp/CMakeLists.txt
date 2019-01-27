@@ -5,9 +5,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include_directories("$ENV{JAVA_HOME}/include/" "$ENV{JAVA_HOME}/include/linux/")
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fdata-sections -ffunction-sections -Wall -Werror -fPIC")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -fPIC")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdata-sections -ffunction-sections -Wall -fPIC -std=gnu++11 -static-libstdc++")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -fPIC -std=gnu++11 -static-libstdc++")
 
 set(CMAKE_C_FLAGS_DEBUG   "${CMAKE_C_FLAGS_DEBUG} -D_DEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -D_DEBUG")
@@ -26,7 +26,7 @@ set(LIB_SOURCE_FILES spartan.cpp spartan-exception.cpp findfiles.cpp ini.cpp cfg
     spartan-exception.cpp launch-program.cpp format2str.cpp log.cpp path-concat.cpp
     str-split.cpp session-state.cpp process-cmd-dispatch-info.cpp StdOutCapture.cpp
     open-anon-pipes.cpp stream-ctx.cpp read-multi-strm.cpp signal-handling.cpp
-    read-on-ready.cpp echo-streams.cpp walk-file-tree.cpp)
+    read-on-ready.cpp echo-streams.cpp walk-file-tree.cpp jvm-pre-init.cpp)
 
 if(DEFINED ENV{spartan_build_dir})
   set(spartan_BUILD_DIR "$ENV{spartan_build_dir}")
