@@ -49,6 +49,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import spartan.annotations.ChildWorkerCommand;
 import spartan.annotations.SupervisorCommand;
 import spartan.annotations.SupervisorMain;
+import spartan_startup.CommandDispatchInfo;
 
 @SuppressWarnings({"unused", "WeakerAccess"})
 public final class test extends SpartanBase {
@@ -79,18 +80,18 @@ public final class test extends SpartanBase {
     System.out.printf("JVM CLASSPATH: %s%n", System.getProperty("java.class.path"));
     System.out.printf("ENV CLASSPATH: %s%n", System.getenv("CLASSPATH"));
     if (dbgLogging) {
-      spartan.CommandDispatchInfo.setDebugLoggingLevel();
+      CommandDispatchInfo.setDebugLoggingLevel();
     }
 
     final String currWDir = Paths.get(".").toAbsolutePath().normalize().toString();
     final Path cmdDspInfo_path = FileSystems.getDefault().getPath(currWDir, "cmdDspInfo.ser");
 
     // serialize system properties and CommandDispatchInfo object to a byte array and then write to a file
-    final byte[] byteSerializedData = spartan.CommandDispatchInfo.obtainSerializedSysPropertiesAndAnnotationInfo();
+    final byte[] byteSerializedData = CommandDispatchInfo.obtainSerializedSysPropertiesAndAnnotationInfo();
     Files.write(cmdDspInfo_path, byteSerializedData, CREATE, TRUNCATE_EXISTING);
 
     // deserialize system properties and CommandDispatchInfo object from a file
-    spartan.CommandDispatchInfo reconstitutedInfo;
+    CommandDispatchInfo reconstitutedInfo;
     try (final InputStream inStrm = Files.newInputStream(cmdDspInfo_path, READ)) {
       try (final ObjectInputStream in = new ObjectInputStream(inStrm)) {
         final Properties sysProps = (Properties) in.readObject();

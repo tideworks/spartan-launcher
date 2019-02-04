@@ -24,6 +24,7 @@ limitations under the License.
 #include "format2str.h"
 #include "log.h"
 #include "findfiles.h"
+#include "session-state.h"
 #include "createjvm.h"
 
 using namespace logger;
@@ -47,7 +48,6 @@ static const unsigned int base_optns = 3;
 extern const_char_ptr_t java_classpath();
 extern const_char_ptr_t java_home_path();
 extern const_char_ptr_t progname();
-extern const_char_ptr_t jvm_cmd_line_args();
 extern void set_exit_flag_true();
 
 static std::string get_java_classpath() {

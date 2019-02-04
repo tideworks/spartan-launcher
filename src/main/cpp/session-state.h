@@ -175,6 +175,8 @@ public:
   friend std::istream& operator >> (std::istream &is, sessionState &self);
 };
 
+const char* jvm_cmd_line_args();
+
 #ifdef _DEBUG
 void debug_dump_sessionState(const sessionState& ss, const char edition = 'A');
 #endif

@@ -34,6 +34,7 @@ limitations under the License.
 #include "createjvm.h"
 #include "launch-program.h"
 #include "session-state.h"
+#include "findfiles.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
 #include <cassert>
@@ -51,14 +52,20 @@ const char PATH_SEPARATOR =
                             ':';
 #endif
 
-extern const char * executable_dir();
-extern const char * progpath();
-extern const char * progname();
-extern const char * jvm_cmd_line_args();
+// these externs are defined in spartan.cpp and are initialized in main() entry point
+extern const char* executable_dir();
+extern const char* progpath();
+extern const char* progname();
 
 // will be populated with a value when config.ini file is parsed
-static string_view s_jvm_cmd_line_args;
-const char * jvm_cmd_line_args() { return s_jvm_cmd_line_args.c_str(); }
+static string_view s_jvm_cmd_line_args{};
+const char* jvm_cmd_line_args() { return s_jvm_cmd_line_args.c_str(); }
+
+static const string_view boot_classpath_optn_strv{ "-Xbootclasspath/a:" };
+static const string_view java_lib_path_optn_strv { "-Djava.library.path=" };
+static const string_view spartan_strv{ "Spartan" };
+static const string_view jar_file_extent_strv{ ".jar" };
+
 
 void sessionState::close_libjvm(void *hlibjvm) {
   const auto pid = getpid();
@@ -199,7 +206,7 @@ std::string get_cfg_dir(const char * const cfg_file) {
   return std::string(cfg_dir);
 }
 
-static std::string prepend_to_java_library_path(const char * const jvm_cmd_line_args); // forward declaration
+static string_view prepend_to_java_library_path(const string_view jvm_cmd_line_args); // forward declaration
 
 #ifdef _DEBUG
 void debug_dump_sessionState(const sessionState& ss, const char edition) {
@@ -268,7 +275,7 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
       std::string value, descriptor;
       if (strcasecmp(section, "JvmSettings") == 0) {
         if (strcasecmp(name, "CommandLineArgs") == 0) {
-          s_jvm_cmd_line_args = strdup(prepend_to_java_library_path(value_cstr).c_str());
+          s_jvm_cmd_line_args = prepend_to_java_library_path(value_cstr);
         }
       } else if (strcasecmp(section, "SupervisorProcessSettings") == 0) {
         if (strcasecmp(name, "MainEntryPoint") == 0) {
@@ -368,6 +375,10 @@ sessionState::sessionState(const char * const cfg_file, const char * const jvmli
     throw;
   } catch(...) {
     raise_initialization_exception(WIE::UNKNOWN);
+  }
+
+  if (s_jvm_cmd_line_args.empty()) {
+    s_jvm_cmd_line_args = prepend_to_java_library_path(string_view{});
   }
 
   std::string class_name;
@@ -599,86 +610,151 @@ std::istream& operator >> (std::istream &is, sessionState &self) {
   return is;
 }
 
-// locates the command line option -Djava.library.path and prepends the executable's path
-// to the set of paths defined there. If is not present, then adds the option.
-//
-static std::string prepend_to_java_library_path(const char * const jvm_cmd_line_args) {
-  auto const compare_argv_str = [](const char * const str1, const char * const str2) -> const char* {
-      char * argv_str_dup = strdupa(str1);
-      // convert argv_str_dup to lowercase
-      for(auto p = argv_str_dup; *p != '\0'; ++p) {
-        *p = static_cast<char>(tolower(*p));
-      }
-      const char *p = strstr(argv_str_dup, str2);
-      return p != nullptr ? str1 + (p - argv_str_dup) : nullptr;
+/**
+ * Locates the Spartan .jar file and prepends the JVM bootclasspath option specifying the
+ * Spartan .jar path. The JVM command line string (the argument passed in) is then appended.
+ *
+ * The function then looks to find presence of JVM option -Djava.library.path.
+ *
+ * If the option is found then it prepends the executable's path to the list of paths defined
+ * by it.
+ *
+ * If the option is not found, then it appends the option, specifying the executable's path.
+ *
+ * NOTE: The Spartan native code shared library will be locatable via the executable's path.
+ *
+ * @param jvm_cmd_line_args the Java JVM command line arguments (as read from config.ini)
+ * @return the Java JVM command line arguments now incorporating directory paths to Spartan
+ * install directory for locating Spartan.jar and libspartan.so
+ */
+static string_view prepend_to_java_library_path(const string_view jvm_cmd_line_args) {
+  static const char* const func_name = __FUNCTION__;
+  const string_view executable_path_strv{ executable_dir() };
+  std::string spartan_jar_path_str{};
+  std::string rtn_str{};
+  rtn_str.resize(jvm_cmd_line_args.size() + 2048);
+
+  // NOTE: it's a fatal condition if unable to locate Spartan .jar file, so will log error and terminate if not found
+  // (only looks in the directory tree where the spartan executable resides, as that is where should be installed at).
+  // The first file encountered that starts with "Spartan" and ends with ".jar" will be the one selected; search match
+  // is case insensitive.
+  try {
+    if (findfiles(executable_path_strv.c_str(),
+                  [&spartan_jar_path_str](const char *const filepath, const char *const filename) {
+                    const char *file_extent = nullptr;
+                    if (strncasecmp(filename, spartan_strv.c_str(), spartan_strv.size()) == 0 &&
+                        (file_extent = strcasestr(filename, jar_file_extent_strv.c_str())) != nullptr)
+                    {
+                      const string_view file_name_sv{filename};
+                      const size_t file_name_base_size = file_extent - filename;
+                      if ((jar_file_extent_strv.size() + file_name_base_size) == file_name_sv.size()) {
+                        spartan_jar_path_str = filepath;
+                        return true;
+                      }
+                    }
+                    return false;
+                  }))
+    {
+      rtn_str = boot_classpath_optn_strv.c_str();
+      rtn_str += spartan_jar_path_str;
+    } else {
+      log(LL::FATAL, "failed to find the %s %s file", spartan_strv.c_str(), jar_file_extent_strv.c_str());
+      _exit(1);
+    }
+  } catch (findfiles_exception &ex) {
+    log(LL::FATAL, "failed to find the %s %s file:\n\t%s: %s",
+        spartan_strv.c_str(), jar_file_extent_strv.c_str(), ex.name(), ex.what());
+    _exit(1);
+  }
+
+  auto const log_returned_jvm_cmd_line_args = [&rtn_str]() {
+    if (is_trace_level()) {
+      log(LL::TRACE, "%s() returned JVM command line arguments:\n\t%s", func_name, rtn_str.c_str());
+    }
   };
 
-  static const char * const java_lib_path_optn_str = "-djava.library.path="; // keep this all lowercase for matching
+  if (!jvm_cmd_line_args.empty()) {
+    int argc = 0;
+    const char**argv = nullptr;
 
-  int argc = 0;
-  const char **argv = nullptr;
+    const auto rtn = poptParseArgvString(jvm_cmd_line_args.c_str(), &argc, &argv);
 
-  const auto rtn = poptParseArgvString(jvm_cmd_line_args, &argc, &argv);
+    if (is_trace_level()) {
+      log(LL::TRACE, "%s() parse of jvm_cmd_line_args: rtn: %d, argc: %d", func_name, rtn, argc);
+    }
+    if (rtn != 0) {
+      log(LL::FATAL, "JVM options could not be parsed: %s\n\t%s\n", poptStrerror(rtn), jvm_cmd_line_args.c_str());
+      _exit(1);
+    }
 
-  log(LL::TRACE, "%s() parse of jvm_cmd_line_args: rtn: %d, argc: %d", __func__, rtn, argc);
-  if (rtn == 0) {
-    auto const cleanup = [](const char**p) {
-        std::free(p);
-    };
-    std::unique_ptr<const char*, decltype(cleanup)> raii_argv_sp(argv, cleanup); // cleanup for the popt argv allocation
+    // provide a RAII cleanup for the popt argv allocation
+    std::unique_ptr<const char*, decltype(&std::free)> raii_argv_sp{ argv, &std::free };
+    std::unique_ptr<char, decltype(&std::free)> raii_rplc_optn_sp{ nullptr, &std::free };
 
-    for(int i = 0; i < argc; i++) {
+    auto const log_found_matching_arg = [](int argc_index, const char *argv_item) {
       if (is_trace_level()) {
-        printf("\targv[%d]: %s\n", i, argv[i]);
+        printf("\tfound a matching argv[%d]: %s\n", argc_index, argv_item);
       }
-      auto p = compare_argv_str(argv[i], java_lib_path_optn_str);
-      if (p != nullptr) {
-        if (is_trace_level()) {
-          printf("\tfound a matching argv[%d]: %s\n", i, p);
-        }
-        char * java_lib_path_optn = strdupa(p);
-        if ((p = strchr(java_lib_path_optn + 1, '=')) != nullptr) {
-          *const_cast<char*>(p) = '\0';   // null terminate string at '=' position
-          const char * const value = p + 1; // advance past the '=' character to value portion of the string
-          int strbuf_size = 512;
-          auto strbuf1 = (char*) alloca(strbuf_size);
-          int n = strbuf_size;
-          // format a new -Djava.library.path definition with the prepended executable's path
-          do_str_fmt: {
-            n = snprintf(strbuf1, (size_t) n, "%s=%s%c%s", java_lib_path_optn, executable_dir(), PATH_SEPARATOR, value);
-            assert(n > 0);
-            if (n >= strbuf_size) {
-              strbuf1 = (char*) alloca(strbuf_size = ++n);
-              goto do_str_fmt; // try again
-            }
-          }
-          if (is_trace_level()) {
-            printf("\treplacement argv[%d]: %s\n", i, strbuf1);
-          }
-          *const_cast<char*>(p) = '='; // put the '=' character back in now
-          p = strstr(jvm_cmd_line_args, java_lib_path_optn);
-          assert(p != nullptr);
-          n = static_cast<int>(p - jvm_cmd_line_args);
-          auto const jvm_cmd_line_args_prefix_dup = strndupa(jvm_cmd_line_args, (size_t) n);
-          auto const jvm_cmd_line_args_suffix_dup = jvm_cmd_line_args + (n + strlen(java_lib_path_optn));
-          strbuf_size = static_cast<int>(n + strlen(strbuf1) + strlen(jvm_cmd_line_args_suffix_dup) + sizeof(char));
-          auto strbuf2 = (char*) alloca(strbuf_size);
-          strcpy(strbuf2, jvm_cmd_line_args_prefix_dup);
-          strcat(strbuf2, strbuf1);
-          strcat(strbuf2, jvm_cmd_line_args_suffix_dup);
+    };
 
-          return std::string(strbuf2);
-        }
+    // search for options: '-Djava.library.path=' and '-Xbootclasspath/a:'
+    for (int i = 0; i < argc; i++) {
+      const string_view arg{ argv[i] };
+      if (is_trace_level()) {
+        printf("\targv[%d]: %s\n", i, (char*)arg.c_str());
+      }
+      if (strncasecmp(arg.c_str(), java_lib_path_optn_strv.c_str(), java_lib_path_optn_strv.size()) == 0) {
+        auto optn = strcasestr(arg.c_str(), java_lib_path_optn_strv.c_str());
+        assert(optn != nullptr);
+        if (optn == nullptr) continue;
+        log_found_matching_arg(i, optn);
+        const string_view optn_value{optn + java_lib_path_optn_strv.size()};
+        std::string replacement_java_lib_path_optn{};
+        replacement_java_lib_path_optn.resize(executable_path_strv.size() + (2 * sizeof(PATH_SEPARATOR)) + arg.size());
+        replacement_java_lib_path_optn += java_lib_path_optn_strv.c_str();
+        replacement_java_lib_path_optn += executable_path_strv.c_str();
+        replacement_java_lib_path_optn += PATH_SEPARATOR;
+        replacement_java_lib_path_optn += optn_value.c_str();
+        raii_rplc_optn_sp.reset(strndup(replacement_java_lib_path_optn.c_str(), replacement_java_lib_path_optn.size()));
+        argv[i] = raii_rplc_optn_sp.get();
+      } else if (strncasecmp(arg.c_str(), boot_classpath_optn_strv.c_str(), boot_classpath_optn_strv.size()) == 0) {
+        auto optn = strcasestr(arg.c_str(), boot_classpath_optn_strv.c_str());
+        assert(optn != nullptr);
+        if (optn == nullptr) continue;
+        log_found_matching_arg(i, optn);
+        const string_view optn_value{optn + boot_classpath_optn_strv.size()};
+        rtn_str += PATH_SEPARATOR;
+        rtn_str += optn_value.c_str();
+        argv[i] = "";
       }
     }
+
+    if (raii_rplc_optn_sp) {
+      // now run through the argv array, append each arg[i] into string buffer and put
+      // double quotes around it; a space character delimiter separates each argument
+      for (int i = 0; i < argc; i++) {
+        const string_view arg{ argv[i] };
+        if (arg.empty()) continue;
+        rtn_str += ' ';
+        rtn_str += '"';
+        rtn_str += arg.c_str();
+        rtn_str += '"';
+      }
+    } else {
+      // append the input JVM command line string as is into the string buffer
+      rtn_str += ' ';
+      rtn_str += jvm_cmd_line_args.c_str();
+    }
+
+    log_returned_jvm_cmd_line_args();
+    return string_view{strndup(rtn_str.c_str(), rtn_str.size()), rtn_str.size()}; // return the updated JVM command line
   }
 
   // command line option -Djava.library.path not found so synthesize one with the executable's path as its value
-  auto const executable_path = executable_dir();
-  auto strbuf = (char*) alloca(sizeof(char) + strlen(java_lib_path_optn_str) + strlen(executable_path) + sizeof(char));
-  *strbuf = ' ';
-  strcpy(strbuf + 1, java_lib_path_optn_str);
-  strcat(strbuf, executable_path);
+  rtn_str += ' ';
+  rtn_str += java_lib_path_optn_strv.c_str();
+  rtn_str += executable_path_strv.c_str();
 
-  return jvm_cmd_line_args + std::string(strbuf);
+  log_returned_jvm_cmd_line_args();
+  return string_view{strndup(rtn_str.c_str(), rtn_str.size()), rtn_str.size()}; // return the updated JVM command line
 }

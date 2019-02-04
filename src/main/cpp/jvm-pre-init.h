@@ -34,8 +34,8 @@ struct sessionState;
 namespace jvm_pre_init {
 
   /**
-   * Methods of this class are only invoked as helper methods from the
-   * spartan invoke_java_method(..) function.
+   * Methods of this class are only invoked as helper methods from the Spartan
+   * invoke_java_method(..) function.
    */
   class jvm_pre_init_ctx {
   private:
@@ -43,6 +43,19 @@ namespace jvm_pre_init {
     const char *&_class_name;
     const char *&_method_name;
   public:
+    /**
+     * Constructor.
+     *
+     * @param env the JNI function calling context
+     *
+     * @param class_name set the name of a class to be searched for into this variable
+     * so that if an exception is thrown, the invoke_java_method(..) catch handler will
+     * have access to its name for error logging
+     *
+     * @param method_name set the name of a method to be searched for into this variable
+     * so that if an exception is thrown, the invoke_java_method(..) catch handler will
+     * have access to its name for error logging
+     */
     jvm_pre_init_ctx(JNIEnv *env, const char *&class_name, const char *&method_name)
         : _env(env), _class_name(class_name), _method_name(method_name) {}
     jvm_pre_init_ctx() = delete;
@@ -52,22 +65,12 @@ namespace jvm_pre_init {
     jvm_pre_init_ctx &operator=(jvm_pre_init_ctx &&) = delete;
     ~jvm_pre_init_ctx() = default;
   public:
+    static const char* split_method_name_from_class_name(const char *stfbuf, const char *full_method_name);
     static methodDescriptor make_obtainSerializedAnnotationInfo_descriptor();
-  private:
-    static methodDescriptor make_setSerializedAnnotationInfo_descriptor();
-  public:
     /**
      * A helper method that is called by invoke_java_method(..) to set the system class loader
      * as the current thread class loader. Any by-int-value exceptions thrown are handled in
      * the function invoke_java_method(..).
-     *
-     * @param class_name set the name of a class to be searched for into this variable
-     * so that if an exception is thrown, the handler will have access to its name
-     * @param method_name  set the name of a method to be searched for into this variable
-     * so that if an exception is thrown, the handler will have access to its name
-     * instance prior to invoking the Spartan service main(..) method.
-
-     * @param env the JNI function calling context
      */
     void set_thread_class_loader_context();
     /**
@@ -76,20 +79,27 @@ namespace jvm_pre_init {
      * thrown are handled in the function invoke_java_method(..).
      *
      * @param method_descriptor Java method that is invoked to do pre-initialization - its class
-     * will be locatable via the JVM -Xbootclasspath/a: classpath.
-     * @param ss the Spartan runtime session state that is to be initialized by this helper method.
+     * will be locatable via the JVM -Xbootclasspath/a: classpath
+     *
+     * @param ss the Spartan runtime session state that is to be initialized by this helper method
+     *
      * @return returns the shared memory allocator where Spartan runtime session state was persisted;
-     * also returns a bool flag that will indicated if an Java exception has been thrown (the allocator
+     * also returns a bool flag that will indicate if an Java exception has been thrown (the allocator
      * will be a nullptr if an exception was thrown)
      */
     std::pair<shm::ShmAllocator *, bool> pre_init_for_supervisor_jvm(const methodDescriptorBase &method_descriptor,
                                                                      sessionState &ss);
     /**
-     * A helper method that is called to do a pre-initialization phSpartan service main(..)ase in child worker Java JVM
-     * instance prior to invoking the child worker sub-command entry point method. Any by-int-value exceptions thrown
-     * are handled in the function invoke_java_method(..).
+     * A helper method that is called to do a pre-initialization phase in child worker Java JVM
+     * instance prior to invoking the child worker sub-command entry point method. Any by-int-value
+     * exceptions thrown are handled in the function invoke_java_method(..).
+     *
+     * @return returns a bool flag that will indicate if an Java exception has been thrown
      */
-    void pre_init_for_child_worker_jvm();
+    bool pre_init_for_child_worker_jvm();
+  private:
+    std::pair<jobject, bool> invoke_supervisor_jvm_bootstrap();
+    bool set_system_boot_layer(jobject module_layer);
   };
 
 } // namespace jvm_pre_init

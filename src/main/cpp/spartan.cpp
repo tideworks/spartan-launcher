@@ -573,19 +573,15 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
   std::unique_ptr<JNIEnv, decltype(detach_thread)> env_sp(jni_attach_thread(jvmp), detach_thread);
 
   // duplicate the original string to local storage that can then be modified
-  const char * const fullMethodName = method_descriptor.c_str();
+  const char * const full_method_name = method_descriptor.c_str();
   const char * const method_signature = method_descriptor.desc_str();
-  const bool invokeAsStatic = method_descriptor.isStatic();
-  const char * class_name = strdupa(fullMethodName);
-  const char * method_name = nullptr;
+  const bool invoke_as_static = method_descriptor.isStatic();
+  const char * class_name  = strdupa(full_method_name);
+  const char * method_name = "";
   static const char * const ctor_name = "<init>";
   try {
-    method_name = [](const char * const stfbuf) -> const char * {
-      char * str = const_cast<char*>(strrchr(stfbuf, '/'));
-      if (str == nullptr || *(str + 1) == '\0')  throw 1;
-      *str = '\0';  // null terminate the class name string
-      return ++str; // return the method name string
-    }(class_name); // get the fully qualified class/method name into two separate strings
+    // get the fully qualified class/method name into two separate strings (may throw exception)
+    method_name = jvm_pre_init_ctx::split_method_name_from_class_name(class_name, full_method_name);
 
     JNIEnv * const env = env_sp.get();
 
@@ -627,18 +623,18 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
     jclass const cls = env->FindClass(class_name);
     if (cls == nullptr) throw 3;
     // get the entry point method
-    jmethodID const mid = invokeAsStatic ?  env->GetStaticMethodID(cls, method_name, method_signature) :
-                                            env->GetMethodID(cls, method_name, method_signature);
+    jmethodID const mid = invoke_as_static ? env->GetStaticMethodID(cls, method_name, method_signature) :
+                                             env->GetMethodID(cls, method_name, method_signature);
     if (mid == nullptr) throw 4;
 
-    if (!invokeAsStatic) {
+    if (!invoke_as_static) {
       log(LL::DEBUG, "%s() getting Spartan object instance...", __func__);
     }
 
     // insure Spartan object instance is instantiated as a singleton (used for non-static method calls)
     jobject mObj = nullptr;
     static volatile std::atomic<jobject> atomicSpartanObj { nullptr };
-    if (!invokeAsStatic && (mObj = atomicSpartanObj.load()) == nullptr) {
+    if (!invoke_as_static && (mObj = atomicSpartanObj.load()) == nullptr) {
       static std::mutex guard;
       std::unique_lock<std::mutex> lk(guard);
       if ((mObj = atomicSpartanObj.load()) == nullptr) {
@@ -698,7 +694,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
         class_name = "java/lang/String{\"program name\"}";
         if (!spProgname_utf_str) throw 5;
 
-        log(LL::DEBUG, "%s() invoking static method \"%s\"", __func__, fullMethodName);
+        log(LL::DEBUG, "%s() invoking static method \"%s\"", __func__, full_method_name);
         env->CallStaticVoidMethod(spartanbase_cls, spartanbase_main, spProgname_utf_str.get(),
                                   (jint) logger::get_level(), spMain_meth.get(), jargs);
         was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
@@ -707,7 +703,8 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
         switch (which_method) {
           case WM::CHILD_DO_CMD: {
             // retrieve shared memory JVM context state and initialize Java JVM (necessary for if in modularity mode)
-            jvm_pre_init_ctx{env, class_name, method_name}.pre_init_for_child_worker_jvm();
+            was_exception_raised = jvm_pre_init_ctx{ env, class_name, method_name }.pre_init_for_child_worker_jvm();
+            if (was_exception_raised) break;
           }
           case WM::GET_STATUS:
           case WM::SUPERVISOR_DO_CMD: {
@@ -835,14 +832,14 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
             const bool is_extended_invoke = fds_array[1] != nullptr && fds_array[2] != nullptr
                                             && react_invoke_descriptor.compare(method_signature) == 0;
 
-            if (invokeAsStatic) {
+            if (invoke_as_static) {
               if (!is_extended_invoke) {
                 if (std_invoke_descriptor.compare(method_signature) != 0) {
                   throw 6;
                 }
                 // invoking command-response method
                 log(LL::DEBUG, "%s() invoking child process sub-command method \"%s\" with PrintStream",
-                    __func__, fullMethodName);
+                    __func__, full_method_name);
 
                 // invoke a child process sub-command with single response stream (static method entry point)
                 env->CallStaticVoidMethod(cls, mid, jargs, spRsp_strm.get());
@@ -852,7 +849,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
                 auto spInput_strm = make_inputstream(make_and_set_fdesc((fds_array[2])->fd));
                 (void) (fds_array[2]).release();
                 log(LL::DEBUG, "%s() invoking child process sub-command method \"%s\" with react streams",
-                    __func__, fullMethodName);
+                    __func__, full_method_name);
 
                 // invoke a child process sub-command with three react streams (static method entry point)
                 env->CallStaticVoidMethod(cls, mid, jargs, spRsp_strm.get(), spErrOut_strm.get(), spInput_strm.get());
@@ -868,7 +865,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
                   throw 6;
                 }
                 log(LL::DEBUG, "%s() invoking supervisor sub-command method \"%s\" with PrintStream",
-                    __func__, fullMethodName);
+                    __func__, full_method_name);
 
                 // invoke supervisor process sub-command with single response stream (instance method entry point)
                 env->CallVoidMethod(mObj, mid, jargs, spRsp_strm.get());
@@ -878,7 +875,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
                 auto spInput_strm = make_inputstream(make_and_set_fdesc((fds_array[2])->fd));
                 (void) (fds_array[2]).release();
                 log(LL::DEBUG, "%s() invoking supervisor sub-command method \"%s\" with react streams",
-                    __func__, fullMethodName);
+                    __func__, full_method_name);
 
                 // invoke supervisor process sub-command with three react streams (instance method entry point)
                 env->CallVoidMethod(mObj, mid, jargs, spRsp_strm.get(), spErrOut_strm.get(), spInput_strm.get());
@@ -887,17 +884,17 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
             if (env->ExceptionCheck() != JNI_FALSE) {
               const auto excptn_str = StdOutCapture::capture_stdout_stderr([env]() { env->ExceptionDescribe(); });
               auto const excptn_cstr = excptn_str.c_str();
-              log(LL::ERR, "process %d Java method %s() threw exception:\n%s", getpid(), fullMethodName, excptn_cstr);
+              log(LL::ERR, "process %d Java method %s() threw exception:\n%s", getpid(), full_method_name, excptn_cstr);
             }
             break;
           }
           case WM::SUPERVISOR_SHUTDOWN: {
-            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
+            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, full_method_name);
             env->CallVoidMethod(mObj, mid);
             break;
           }
           case WM::CHILD_NOTIFY: {
-            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
+            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, full_method_name);
             const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
             const char *const cmd_line = argv[1];
             defer_jstr_t spUtf_str(env->NewStringUTF(cmd_line), defer_jstr);
@@ -909,16 +906,18 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
             break;
           }
           case WM::CHILD_COMPLETION_NOTIFY: {
-            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, fullMethodName);
+            log(LL::DEBUG, "%s() invoking method \"%s\"", __func__, full_method_name);
             const auto pid = static_cast<jint>(strtol(argv[0], nullptr, 10));
             env->CallVoidMethod(mObj, mid, pid);
             break;
           }
           default: // do nothing
-            log(LL::WARN, "%s() not valid or known method \"%s\"", __func__, fullMethodName);
+            log(LL::WARN, "%s() not valid or known method \"%s\"", __func__, full_method_name);
             break;
         }
-        was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
+        if (!was_exception_raised) {
+          was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
+        }
       }
       if (was_exception_raised) {
         const auto excptn_str = StdOutCapture::capture_stdout_stderr([env]() { env->ExceptionDescribe(); });
@@ -934,14 +933,18 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
           getpid(), class_name, method_name, ex_nm.c_str());
       _exit(EXIT_FAILURE);
     }
+  } catch(const std::string &full_method_name_str) {
+    env_sp.reset(nullptr); // clean this up now so don't get in race condition with exit of parent thread
+    log(LL::ERR, "%s() invalid specification of method entry point \"%s\"", __func__, full_method_name_str.c_str());
+    ret = EXIT_FAILURE;
   } catch(int which) {
     env_sp.reset(nullptr); // clean this up now so don't get in race condition with exit of parent thread
     switch (which) {
     case 1:
-      log(LL::ERR, "%s() invalid specification of method entry point \"%s\"", __func__, fullMethodName);
+      log(LL::ERR, "%s() invalid specification of method entry point \"%s\"", __func__, full_method_name);
       break;
     case 2:
-      log(LL::ERR, "%s() failed allocating Java args array for invoking \"%s\"", __func__, fullMethodName);
+      log(LL::ERR, "%s() failed allocating Java args array for invoking \"%s\"", __func__, full_method_name);
       break;
     case 3:
       log(LL::ERR, "%s() failed finding Java class \"%s\"",  __func__, class_name);
@@ -954,18 +957,22 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
       break;
     case 6: {
       log(LL::ERR, "%s() invalid method descriptor for invoking as sub-command: %s\n\t%s(..)\n\tdescriptor: \"%s\"",
-          __func__, method_descriptor.cmd_cstr(), fullMethodName, method_signature);
+          __func__, method_descriptor.cmd_cstr(), full_method_name, method_signature);
       break;
     }
     default:
-      log(LL::ERR, "%s() unspecified exception invoking method \"%s(..)\"", __func__, fullMethodName);
+      log(LL::ERR, "%s() unspecified exception invoking method \"%s(..)\"", __func__, full_method_name);
     }
-    env_sp.reset(nullptr); // clean this up prior to potentially exiting the process asynchronously
+    ret = EXIT_FAILURE;
+  }
+
+  if (ret == EXIT_FAILURE) {
     if (getpid() == get_parent_pid()) {
       quit_launcher_on_term_code(EXIT_FAILURE); // let the parent process know to terminate
     }
     return EXIT_FAILURE;
   }
+
   env_sp.reset(nullptr); // clean this up now as its side effect sets the variable ret
   return ret;
 }
@@ -1090,8 +1097,8 @@ static int supervisor(int argc, char **argv, sessionState& session) {
       auto const invoke_jvm_entrypoint = [&jvm_exit, &session, argc, argv](std::promise<void> prom_rref) {
 
         auto const action = [&prom_rref, argc, argv](sessionState &session_param, JavaVM *const jvm) -> int {
-          methodDescriptor obtainSerializedAnnotationInfo =
-              jvm_pre_init_ctx::make_obtainSerializedAnnotationInfo_descriptor();
+          const methodDescriptor obtainSerializedAnnotationInfo{
+              jvm_pre_init_ctx::make_obtainSerializedAnnotationInfo_descriptor()};
           auto rc = invoke_java_method(jvm, obtainSerializedAnnotationInfo, argc, argv, &session_param);
           shm_allocator_sp_t sp_shm_alloc = std::move(s_shm_allocator_sp);
           if (rc != EXIT_SUCCESS) {

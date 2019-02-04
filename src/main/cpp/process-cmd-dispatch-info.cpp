@@ -64,7 +64,9 @@ namespace cmd_dsp {
     }
   }
 
-  shm::ShmAllocator* CmdDispatchInfoProcessor::process_initial_cmd_dispatch_info(jbyteArray ser_cmd_dispatch_info) {
+  shm::ShmAllocator* CmdDispatchInfoProcessor::process_initial_cmd_dispatch_info(
+      jbyteArray ser_module_paths, jbyteArray ser_cmd_dispatch_info)
+  {
 #ifdef _DEBUG
     debug_dump_sessionState(ss, 'B');
 #endif
@@ -92,7 +94,7 @@ namespace cmd_dsp {
     debug_dump_dispatch_info(sp_cmd_dispatch_info.get());
 #endif
 
-    const methodDescriptor mainEntryPoint_save = ss.spartanMainEntryPoint;
+    methodDescriptor mainEntryPoint_save = ss.spartanMainEntryPoint;
     apply_cmd_dsp_info_to_session_state(sp_sys_prop_strs.get(), sp_cmd_dispatch_info.get());
     if (!mainEntryPoint_save.empty()) {
       // config.ini mainEntry specifier takes precedence over Java @SupervisorMain annotation, i.e., acts as an override
@@ -106,21 +108,33 @@ namespace cmd_dsp {
     const auto ss_ser_membuf = serialize_session_state_to_membuf(ss);
 
     const auto pg_size = sysconf(_SC_PAGE_SIZE);
-    const auto byteArrayLen = env->GetArrayLength(ser_cmd_dispatch_info);
-    const auto shm_required_size = sizeof(int32_t) + byteArrayLen + sizeof(int32_t) + ss_ser_membuf.size();
+    const auto byteArrayOneLen = env->GetArrayLength(ser_module_paths);
+    const auto byteArrayTwoLen = env->GetArrayLength(ser_cmd_dispatch_info);
+    const auto shm_required_size =  sizeof(int32_t) + byteArrayOneLen +
+                                    sizeof(int32_t) + byteArrayTwoLen +
+                                    sizeof(int32_t) + ss_ser_membuf.size();
     auto pgs = static_cast<int>(shm_required_size / pg_size);
-    const auto rem = shm_required_size % pg_size;
-    if (rem != 0) pgs++;
+    if ((shm_required_size % pg_size) != 0) pgs++;
 
     using shm_alloc_t = shm::ShmAllocator;
     auto const cleanup_shm_alloc = [](shm_alloc_t *p) { ::delete p; };
-    std::unique_ptr<shm_alloc_t, decltype(cleanup_shm_alloc)> sp_shm_alloc(shm::make(pgs), cleanup_shm_alloc);
+    std::unique_ptr<shm_alloc_t, decltype(cleanup_shm_alloc)> sp_shm_alloc{ shm::make(pgs), cleanup_shm_alloc };
     auto const byte_mem_buffer = new(*sp_shm_alloc) jbyte[shm_required_size];
     auto byte_mem_buf_pos = byte_mem_buffer;
-    *reinterpret_cast<int32_t*>(byte_mem_buf_pos) = byteArrayLen;
+
+    // append serialized module paths byte array
+    *reinterpret_cast<int32_t*>(byte_mem_buf_pos) = byteArrayOneLen;
     byte_mem_buf_pos += sizeof(int32_t);
-    env->GetByteArrayRegion(ser_cmd_dispatch_info, 0, byteArrayLen, byte_mem_buf_pos);
-    byte_mem_buf_pos += byteArrayLen;
+    env->GetByteArrayRegion(ser_module_paths, 0, byteArrayOneLen, byte_mem_buf_pos);
+    byte_mem_buf_pos += byteArrayOneLen;
+
+    // append serialized command dispatch info byte array
+    *reinterpret_cast<int32_t*>(byte_mem_buf_pos) = byteArrayTwoLen;
+    byte_mem_buf_pos += sizeof(int32_t);
+    env->GetByteArrayRegion(ser_cmd_dispatch_info, 0, byteArrayTwoLen, byte_mem_buf_pos);
+    byte_mem_buf_pos += byteArrayTwoLen;
+
+    // append serialized session state byte array
     *reinterpret_cast<int32_t*>(byte_mem_buf_pos) = static_cast<int32_t>(ss_ser_membuf.size());
     byte_mem_buf_pos += sizeof(int32_t);
     memcpy(byte_mem_buf_pos, &ss_ser_membuf.front(), ss_ser_membuf.size());
@@ -141,7 +155,7 @@ namespace cmd_dsp {
     method_name = "toString";
     jmethodID const to_string_method = env->GetMethodID(cls, method_name, "()Ljava/lang/String;");
     if (to_string_method == nullptr) throw 4;
-    auto result = static_cast<jstring>(env->CallObjectMethod(cmd_dispatch_info, to_string_method));
+    auto result = reinterpret_cast<jstring>(env->CallObjectMethod(cmd_dispatch_info, to_string_method));
     jstr_t jstr{ JNI_FALSE, result, nullptr };
     jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
@@ -162,7 +176,7 @@ namespace cmd_dsp {
       std::string str;
       for (int i = 0; i < array_len; i++) {
         jstr.isCopy = JNI_FALSE;
-        jstr.j_str = static_cast<jstring>(env->GetObjectArrayElement(jstr_array, i));
+        jstr.j_str = reinterpret_cast<jstring>(env->GetObjectArrayElement(jstr_array, i));
         jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
         defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
         str = sp_jstr->c_str;
@@ -172,7 +186,7 @@ namespace cmd_dsp {
   }
 
   void CmdDispatchInfoProcessor::apply_cmd_dsp_info_to_session_state(jobject sys_prop_strs, jobject cmd_dispatch_info) {
-    auto const sys_prop_strs_array = static_cast<jobjectArray>(sys_prop_strs);
+    auto const sys_prop_strs_array = reinterpret_cast<jobjectArray>(sys_prop_strs);
     process_jstring_array(env, sys_prop_strs_array,
                           [this](int array_len) {
                             log(LL::DEBUG, "sys_prop_strs_array length: %d", array_len);
@@ -201,12 +215,14 @@ namespace cmd_dsp {
 
       std::string cls_path_str;
       cls_path_str.reserve(2048);
-      process_jstring_array(env, static_cast<jobjectArray>(sp_cls_path_array.get()), [](int array_len) {},
+      auto const cls_path_array = reinterpret_cast<jobjectArray>(sp_cls_path_array.get());
+      process_jstring_array(env, cls_path_array,
+                            [](int array_len) {},
                             [&cls_path_str](std::string &str) {
                               if (!cls_path_str.empty()) {
                                 cls_path_str += ':';
                               }
-                              cls_path_str += std::move(str);
+                              cls_path_str += str;
                             });
       ss.systemClassPath = std::move(cls_path_str);
       log(LL::DEBUG, "CLASSPATH: %s", ss.systemClassPath.c_str());
@@ -225,7 +241,7 @@ namespace cmd_dsp {
 #endif
 
       defer_jobj_t sp_supervisor_cmds(env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
-      auto const supervisor_cmds_array = static_cast<jobjectArray>(sp_supervisor_cmds.get());
+      auto const supervisor_cmds_array = reinterpret_cast<jobjectArray>(sp_supervisor_cmds.get());
       const auto array_len = env->GetArrayLength(supervisor_cmds_array);
       if (array_len > 0) {
         log(LL::DEBUG, "supervisor_cmds_array length: %d", array_len);
@@ -267,7 +283,7 @@ namespace cmd_dsp {
 #endif
 
       defer_jobj_t sp_child_worker_cmds(env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
-      auto const child_worker_cmds_array = static_cast<jobjectArray>(sp_child_worker_cmds.get());
+      auto const child_worker_cmds_array = reinterpret_cast<jobjectArray>(sp_child_worker_cmds.get());
       const auto array_len = env->GetArrayLength(child_worker_cmds_array);
       if (array_len > 0) {
         log(LL::DEBUG, "child_worker_cmds_array length: %d", array_len);
@@ -361,7 +377,7 @@ namespace cmd_dsp {
                       entry_points_class.length()) != 0) {
         auto parts = str_split(pentry_method->fullMethodName.c_str(), '/');
         assert(parts.size() >= 2); // should be minimum of 2 parts
-        if (parts.size() < 1) continue;
+        if (parts.empty()) continue;
         const auto last_elm = parts.size() - 1;
         pentry_method->fullMethodName = entry_points_class;
         pentry_method->fullMethodName += parts[last_elm];
@@ -386,11 +402,11 @@ namespace cmd_dsp {
 
     auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
     jstr_t jstr{ JNI_FALSE, nullptr, nullptr };
-    jstr.j_str = static_cast<jstring>(env->GetObjectField(method_info, field_id));
+    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_info, field_id));
     jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
     main_entry_str = sp_jstr->c_str;
-    sp_jstr.release();
+    (void) sp_jstr.release();
     replace(main_entry_str.begin(), main_entry_str.end(), '.', '/');
     main_entry_str += '/';
 
@@ -403,11 +419,11 @@ namespace cmd_dsp {
 
     jstr.isCopy = JNI_FALSE;
     jstr.c_str = nullptr;
-    jstr.j_str = static_cast<jstring>(env->GetObjectField(method_info, field_id));
+    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_info, field_id));
     jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     sp_jstr.reset(&jstr);
     main_entry_str += sp_jstr->c_str;
-    sp_jstr.release();
+    (void) sp_jstr.release();
 
     field_id = env->GetFieldID(meth_info_cls, "descriptor", java_string_descriptor);
 #ifdef NDEBUG
@@ -418,11 +434,11 @@ namespace cmd_dsp {
 
     jstr.isCopy = JNI_FALSE;
     jstr.c_str = nullptr;
-    jstr.j_str = static_cast<jstring>(env->GetObjectField(method_info, field_id));
+    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_info, field_id));
     jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     sp_jstr.reset(&jstr);
     descriptor_str = sp_jstr->c_str;
-    sp_jstr.release();
+    (void) sp_jstr.release();
 
     action(main_entry_str, descriptor_str);
 
@@ -441,7 +457,7 @@ namespace cmd_dsp {
 
     auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
     jstr_t jstr{ JNI_FALSE, nullptr, nullptr };
-    jstr.j_str = static_cast<jstring>(env->GetObjectField(method_cmd_info, field_id));
+    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_cmd_info, field_id));
     jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
 
@@ -469,7 +485,7 @@ namespace cmd_dsp {
     std::string jvm_optns_str;
 
     defer_jobj_t sp_jvm_optns(env->GetObjectField(method_cmd_info, field_id), defer_jobj);
-    auto const jvm_optns_array = static_cast<jobjectArray>(sp_jvm_optns.get());
+    auto const jvm_optns_array = reinterpret_cast<jobjectArray>(sp_jvm_optns.get());
     const auto array_len = env->GetArrayLength(jvm_optns_array);
     if (array_len > 0) {
       jvm_optns_str.reserve(2048);
@@ -477,7 +493,7 @@ namespace cmd_dsp {
       jstr_t jstr{JNI_FALSE, nullptr, nullptr};
       for(int i = 0; i < array_len; i++) {
         jstr.isCopy = JNI_FALSE;
-        jstr.j_str = static_cast<jstring>(env->GetObjectArrayElement(jvm_optns_array, i));
+        jstr.j_str = reinterpret_cast<jstring>(env->GetObjectArrayElement(jvm_optns_array, i));
         jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
         defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
         if (!jvm_optns_str.empty()) {
@@ -497,12 +513,12 @@ namespace cmd_dsp {
     strm << ss;
     const auto length = strm.tellp();
     std::vector<char> membuf(static_cast<size_t >(length));
-    strm.seekg(0, strm.beg);
+    strm.seekg(0, std::stringstream::beg);
     strm.read(&membuf.front(), length);
     return membuf; // rely on return value optimization (compiler will select move semantics)
   }
 
-  static void unmap_shm_client(void *p, size_t shm_size) {
+  void unmap_shm_client(void *p, size_t shm_size) {
     if (p != nullptr) {
       shm::unmap(p, shm_size);
       log(LL::DEBUG, "pid(%d): unmapped shared memory \"/%s\": %p of size %lu", getpid(), progname(), p, shm_size);
@@ -510,11 +526,20 @@ namespace cmd_dsp {
   }
 
   static std::tuple<const char*, int32_t> get_session_state_buf_info(void *shm_base) {
+    // skip over serialized module paths byte array
     auto byte_mem_buf_pos = reinterpret_cast<const char*>(shm_base);
     auto block_size = *reinterpret_cast<const int32_t*>(byte_mem_buf_pos);
     byte_mem_buf_pos += sizeof(block_size) + block_size;
+
+    // skip over serialized command dispatch info byte array
+    block_size = *reinterpret_cast<const int32_t*>(byte_mem_buf_pos);
+    byte_mem_buf_pos += sizeof(block_size) + block_size;
+
+    // skip over serialized command dispatch info size field
     block_size = *reinterpret_cast<const int32_t*>(byte_mem_buf_pos);
     byte_mem_buf_pos += sizeof(block_size);
+
+    // return serialized command dispatch info byte array and its size
     return std::make_tuple(byte_mem_buf_pos, block_size);
   }
 
@@ -547,7 +572,7 @@ namespace cmd_dsp {
   std::unordered_set<std::string> get_child_processor_commands(const sessionState &ss) {
     std::unordered_set<std::string> cmds_set(29);
     if (!ss.spartanChildProcessorCommands.empty()) {
-      std::string cmds(ss.spartanChildProcessorCommands.c_str());
+      std::string cmds(ss.spartanChildProcessorCommands);
       std::transform(cmds.begin(), cmds.end(), cmds.begin(), ::tolower);
       auto cmds_dup = strdupa(cmds.c_str());
       static const char *const delim = ",";

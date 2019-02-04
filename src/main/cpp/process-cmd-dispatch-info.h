@@ -39,7 +39,7 @@ namespace cmd_dsp {
   public:
     CmdDispatchInfoProcessor(JNIEnv *env, const char *&cls_name, const char *&meth_name, jclass cls, sessionState &ss) :
         env(env), class_name(cls_name), method_name(meth_name), cls(cls), ss(ss) {}
-    shm::ShmAllocator* process_initial_cmd_dispatch_info(jbyteArray ser_cmd_dispatch_info);
+    shm::ShmAllocator* process_initial_cmd_dispatch_info(jbyteArray ser_module_paths, jbyteArray ser_cmd_dispatch_info);
   private:
 #ifdef _DEBUG
     void debug_dump_dispatch_info(jobject cmd_dispatch_info);
@@ -53,6 +53,7 @@ namespace cmd_dsp {
                                            const std::function<void(std::string &)> &action);
   };
 
+  void unmap_shm_client(void *p, size_t shm_size);
   void get_cmd_dispatch_info(sessionState &ss);
   std::unordered_set<std::string> get_child_processor_commands(const sessionState &ss);
 }

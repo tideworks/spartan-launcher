@@ -16,7 +16,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 */
-package spartan;
+package spartan_startup;
 
 import static java.lang.String.format;
 import static spartan.util.EnumAsStream.enumerationAsStream;
@@ -119,7 +119,7 @@ public final class CommandDispatchInfo implements Serializable {
   @SuppressWarnings({"unchecked", "unused", "UnusedReturnValue"})
   private static <T extends Throwable, R> R uncheckedExceptionThrow(Throwable t) throws T { throw (T) t; }
 
-  protected static void setDebugLoggingLevel() {
+  public static void setDebugLoggingLevel() {
     loggingLevel = spartan.Spartan.LL_DEBUG;
   }
   private static void logF(Supplier<String> msg) {
