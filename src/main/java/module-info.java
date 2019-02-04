@@ -1,4 +1,4 @@
-module Spartan {
+module spartan.launcher {
   requires java.base;
   requires javassist;
   requires static logback.core;
