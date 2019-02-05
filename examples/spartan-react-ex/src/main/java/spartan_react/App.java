@@ -400,6 +400,6 @@ public class App extends SpartanBase {
    *           exception and thus never actually return)
    * @throws T the re-thrown exception
    */
-  @SuppressWarnings("all")
+  @SuppressWarnings({"unchecked", "unused", "UnusedReturnValue"})
   private static <T extends Throwable, R> R uncheckedExceptionThrow(Throwable t) throws T { throw (T) t; }
 }
