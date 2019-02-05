@@ -51,6 +51,13 @@ const char* jvm_pre_init_ctx::split_method_name_from_class_name(const char* cons
   return ++str; // return the method name string
 }
 
+static methodDescriptor make_ModuleLayer_findLoader_descriptor() {
+  return methodDescriptor(
+      "java/lang/ModuleLayer/findLoader",
+      "(Ljava/lang/String;)Ljava/lang/ClassLoader;",
+      true, WM::NONE);
+}
+
 methodDescriptor jvm_pre_init_ctx::make_obtainSerializedAnnotationInfo_descriptor() {
   return methodDescriptor(
       "spartan_startup/CommandDispatchInfo/obtainSerializedSysPropertiesAndAnnotationInfo",
@@ -150,15 +157,41 @@ std::pair<shm::ShmAllocator *, bool> jvm_pre_init_ctx::pre_init_for_supervisor_j
   DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
 
   auto rtn = invoke_supervisor_jvm_bootstrap();
-  jobject const serialized_module_paths_jbyte_array = std::get<0>(rtn);
-  bool was_exception_raised = std::get<1>(rtn);
-  defer_jobj_t serialized_module_paths_sp{ serialized_module_paths_jbyte_array, defer_jobj };
+  defer_jobj_t module_layer_sp{ std::get<0>(rtn), defer_jobj };
+  defer_jobj_t serialized_module_paths_sp{ std::get<1>(rtn), defer_jobj };
+  bool was_exception_raised = std::get<2>(rtn);
   if (was_exception_raised) {
     return std::make_pair(nullptr, was_exception_raised);
   }
 
-  jclass const jcls = _env->FindClass(_class_name);
-  if (jcls == nullptr) throw 3;
+  jclass jcls = nullptr;
+
+  if (module_layer_sp) {
+    const methodDescriptor find_loader{ make_ModuleLayer_findLoader_descriptor() };
+    const char *const module_layer_cls_name = strdupa(find_loader.c_str());
+    const char *const findLoader_method = split_method_name_from_class_name(module_layer_cls_name, find_loader.c_str());
+
+    // save state of these local variables (may be referenced in caught exception handling code below)
+    const char * const class_name_sav  = _class_name;
+    const char * const method_name_sav = _method_name;
+
+    _class_name = module_layer_cls_name;
+    jcls = _env->GetObjectClass(module_layer_sp.get());
+    if (jcls == nullptr) throw 3;
+
+    _method_name = findLoader_method;
+    jmethodID const mid = _env->GetMethodID(jcls, findLoader_method, find_loader.desc_str());
+    if (mid == nullptr) throw 4;
+
+    // TODO: finish implementing using ModuleLayer.findLoader() to load class and execute targted method
+
+    // restore state of these local variables
+    _class_name  = class_name_sav;
+    _method_name = method_name_sav;
+  } else {
+    jcls = _env->FindClass(_class_name);
+    if (jcls == nullptr) throw 3;
+  }
 
   jmethodID const get_cmd_dispatch_info = _env->GetStaticMethodID(jcls, _method_name, method_descriptor.desc_str());
   if (get_cmd_dispatch_info == nullptr) throw 4;
@@ -241,7 +274,7 @@ static jobjectArray jargs_from_args(JNIEnv* const env) {
   return get_empty_jargs(env);
 }
 
-std::pair<jobject, bool> jvm_pre_init_ctx::invoke_supervisor_jvm_bootstrap() {
+std::tuple<jobject, jobject, bool> jvm_pre_init_ctx::invoke_supervisor_jvm_bootstrap() {
   DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
 
   const methodDescriptor supervisorJvmBootStrap { make_supervisorJvmBootStrap_descriptor() };
@@ -268,6 +301,7 @@ std::pair<jobject, bool> jvm_pre_init_ctx::invoke_supervisor_jvm_bootstrap() {
   defer_jobj_t pair_sp{ pair, defer_jobj };
   bool was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
 
+  defer_jobj_t module_layer_sp{ nullptr, defer_jobj };
   jobject serialized_module_paths = nullptr;
 
   if (!was_exception_raised) {
@@ -284,7 +318,7 @@ std::pair<jobject, bool> jvm_pre_init_ctx::invoke_supervisor_jvm_bootstrap() {
     if (pair_get_left_mid == nullptr) throw 4;
 
     jobject const module_layer = _env->CallObjectMethod(pair_sp.get(), pair_get_left_mid);
-    defer_jobj_t module_layer_sp{ module_layer, defer_jobj };
+    module_layer_sp.reset(module_layer);
     was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
 
     if (!was_exception_raised && module_layer_sp) {
@@ -306,8 +340,9 @@ std::pair<jobject, bool> jvm_pre_init_ctx::invoke_supervisor_jvm_bootstrap() {
   _class_name  = class_name_sav;
   _method_name = method_name_sav;
 
-  return std::make_pair(serialized_module_paths != nullptr ? serialized_module_paths : _env->NewByteArray(0),
-                        was_exception_raised);
+  return std::make_tuple(module_layer_sp.release(),
+                         serialized_module_paths != nullptr ? serialized_module_paths : _env->NewByteArray(0),
+                         was_exception_raised);
 }
 
 /**

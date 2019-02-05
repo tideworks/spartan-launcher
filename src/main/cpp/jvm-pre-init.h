@@ -98,7 +98,7 @@ namespace jvm_pre_init {
      */
     bool pre_init_for_child_worker_jvm();
   private:
-    std::pair<jobject, bool> invoke_supervisor_jvm_bootstrap();
+    std::tuple<jobject, jobject, bool> invoke_supervisor_jvm_bootstrap();
     bool set_system_boot_layer(jobject module_layer);
   };
 

@@ -639,8 +639,11 @@ static string_view prepend_to_java_library_path(const string_view jvm_cmd_line_a
   // The first file encountered that starts with "Spartan" and ends with ".jar" will be the one selected; search match
   // is case insensitive.
   try {
+    fprintf(stderr, "DEBUG: search for %s %s file in directory:\n\t\"%s\"\n",
+            (char*)spartan_strv.c_str(), (char*)jar_file_extent_strv.c_str(), (char*)executable_path_strv.c_str());
     if (findfiles(executable_path_strv.c_str(),
                   [&spartan_jar_path_str](const char *const filepath, const char *const filename) {
+                    fprintf(stderr, "DEBUG:\t\"%s\"\n", filepath);
                     const char *file_extent = nullptr;
                     if (strncasecmp(filename, spartan_strv.c_str(), spartan_strv.size()) == 0 &&
                         (file_extent = strcasestr(filename, jar_file_extent_strv.c_str())) != nullptr)
@@ -658,12 +661,13 @@ static string_view prepend_to_java_library_path(const string_view jvm_cmd_line_a
       rtn_str = boot_classpath_optn_strv.c_str();
       rtn_str += spartan_jar_path_str;
     } else {
-      log(LL::FATAL, "failed to find the %s %s file", spartan_strv.c_str(), jar_file_extent_strv.c_str());
+      log(LL::FATAL, "failed to find the %s %s file in directory:\n\t\"%s\"",
+          spartan_strv.c_str(), jar_file_extent_strv.c_str(), executable_path_strv.c_str());
       _exit(1);
     }
   } catch (findfiles_exception &ex) {
-    log(LL::FATAL, "failed to find the %s %s file:\n\t%s: %s",
-        spartan_strv.c_str(), jar_file_extent_strv.c_str(), ex.name(), ex.what());
+    log(LL::FATAL, "failed to find the %s %s file: in directory:\n\t\"%s\"\n\t%s: %s",
+        spartan_strv.c_str(), jar_file_extent_strv.c_str(), executable_path_strv.c_str(), ex.name(), ex.what());
     _exit(1);
   }
 

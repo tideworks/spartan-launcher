@@ -6,7 +6,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -23,7 +22,8 @@ import java.lang.module.ModuleReference;
 
 @SuppressWarnings("unused")
 final class SpartanBootStrap {
-  private static String clsName = SpartanBootStrap.class.getSimpleName();
+  private static final String clsName = SpartanBootStrap.class.getSimpleName();
+  private static final char PSC = ':' != File.pathSeparatorChar ? ':' : ';';
 
   @SuppressWarnings("WeakerAccess")
   private static final class Pair<T, U> implements Serializable {
@@ -39,7 +39,7 @@ final class SpartanBootStrap {
   private static Pair<ModuleLayer, byte[]> supervisorJvmBootStrap(String[] jvmArgs, boolean isDebug) throws Exception {
     if (isDebug) {
       final String output = String.join("\" \"", jvmArgs);
-      System.out.printf(">> %s.supervisorJvmBootStrap(\"%s\")%n", clsName, output);
+      System.err.printf("DEBUG: >> %s.supervisorJvmBootStrap(\"%s\")%n", clsName, output);
     }
 
     final Consumer<String> noArgumentSuppliedErr =
@@ -47,13 +47,15 @@ final class SpartanBootStrap {
 
     String[] modPaths = new String[0];
     String modWithEntryMain = "";
+    Path spartan_launcher_path = null;
 
     final int argsLen = jvmArgs.length;
     if (argsLen > 1) {
       for (int i = 0; i < argsLen; i++) {
-        final String[] argParts = jvmArgs[i].split("=", 2);
+        final String arg = jvmArgs[i];
+        final String[] argParts = arg.split("=", 2);
         final String argOptn = argParts[0].toLowerCase();
-        final String argVal = argParts.length > 1 ? argParts[1] : null;
+        String argVal = argParts.length > 1 ? argParts[1] : null;
         switch(argOptn) {
           case "--module-path":
           case "-p": {
@@ -70,8 +72,7 @@ final class SpartanBootStrap {
                 continue;
               }
             }
-            final char psc = ':' != File.pathSeparatorChar ? ':' : ';';
-            modPaths = modPath.replace(psc, File.pathSeparatorChar).split(File.pathSeparator);
+            modPaths = modPath.replace(PSC, File.pathSeparatorChar).split(File.pathSeparator);
             break;
           }
           case "--module":
@@ -85,7 +86,22 @@ final class SpartanBootStrap {
                 modWithEntryMain = jvmArgs[n];
               } else {
                 noArgumentSuppliedErr.accept(argOptn);
-                continue;
+              }
+            }
+            System.err.printf("WARNING: %s %s%n\t%s ignored - use Spartan annotation to mark service entry method:%n",
+                  argOptn, modWithEntryMain, argOptn);
+            break;
+          }
+          default: {
+            if (argOptn.startsWith("-xbootclasspath/a:")) { /* doing coerced lowercase comparison */
+              final int offset = arg.indexOf(':') + 1;
+              if (offset < arg.length()) {
+                argVal = arg.substring(offset).replace(PSC, File.pathSeparatorChar).split(File.pathSeparator)[0];
+                final Path argValPath = Paths.get(argVal);
+                final String fileName = argValPath.getFileName().toString().toLowerCase();
+                if (fileName.startsWith("spartan")) { /* doing coerced lowercase comparison */
+                  spartan_launcher_path = argValPath;
+                }
               }
             }
             break;
@@ -95,7 +111,10 @@ final class SpartanBootStrap {
     }
 
     if (modPaths.length > 0) {
-      final ArrayList<Path> validatedModuleFilePathsList = new ArrayList<>(modPaths.length);
+      final ArrayList<Path> validatedModuleFilePathsList = new ArrayList<>(modPaths.length + 1);
+      if (spartan_launcher_path != null) {
+        validatedModuleFilePathsList.add(spartan_launcher_path);
+      }
       for (final String modPath : modPaths) {
         Path modFilePath = Paths.get(new File(modPath).toURI());
         final Path normPath = modFilePath.normalize();
@@ -107,7 +126,7 @@ final class SpartanBootStrap {
         }
         validatedModuleFilePathsList.add(modFilePath);
       }
-      for (final Path modPath : validatedModuleFilePathsList) {
+      for (final Path modPath : validatedModuleFilePathsList.toArray(new Path[0])) {
         if (modPath.toString().endsWith(".jar") && Files.isRegularFile(modPath)) {
           checkManifestClassPathDependencies(validatedModuleFilePathsList, modPath);
         }
@@ -123,7 +142,7 @@ final class SpartanBootStrap {
   @SuppressWarnings("unchecked")
   private static ModuleLayer childWorkerJvmBootStrap(byte[] serializedModulePaths, boolean isDebug) throws Exception {
     if (isDebug) {
-      System.out.printf(">> %s.childWorkerJvmBootStrap(..)%n", clsName);
+      System.err.printf(">> %s.childWorkerJvmBootStrap(..)%n", clsName);
     }
 
     List<Pair<String, String>> modulesList = (List<Pair<String, String>>) Collections.EMPTY_LIST;
@@ -191,7 +210,7 @@ final class SpartanBootStrap {
   private static void checkManifestClassPathDependencies(final ArrayList<Path> jarPaths, final Path jarFile)
         throws IOException
   {
-    final String jarDir = jarFile.getParent().toString();
+    final File jarDir = jarFile.getParent().toFile();
     try (final JarInputStream jarInputStream = new JarInputStream(Files.newInputStream(jarFile))) {
       final Manifest manifest = jarInputStream.getManifest();
       if (manifest != null) {
@@ -203,7 +222,7 @@ final class SpartanBootStrap {
             jarPaths.ensureCapacity(jarPaths.size() + manifestClassPath.length + 1);
             Arrays.stream(manifestClassPath)
                   .filter(Objects::nonNull)
-                  .map(pathStr -> Paths.get(new File(pathStr).toURI()))
+                  .map(fileName -> Paths.get(new File(jarDir, fileName).toURI()))
                   .forEach(path -> {
                     final Path normPath = path.normalize();
                     if (Files.exists(normPath)) {
@@ -228,15 +247,15 @@ final class SpartanBootStrap {
     final Optional<URI> location = mr.location();
     final URI uri = location.orElse(null);
     final Path path = uri != null ? Paths.get(uri) : null;
-    System.out.printf("%nINFO: Module: %s, Location: %s%n", md.name(), path);
+    System.err.printf("%nDEBUG: Module: %s, Location: %s%n", md.name(), path);
     try (final ModuleReader reader = mr.open()) {
       reader.list()
             .filter(allowIt)
-            .forEach(System.out::println);
+            .forEach(System.err::println);
     } catch (IOException ioe) {
       uncheckedExceptionThrow(ioe);
     }
-    System.out.println();
+    System.err.println();
   }
 
   @SuppressWarnings({"unchecked", "Unused", "UnusedReturnValue"})
