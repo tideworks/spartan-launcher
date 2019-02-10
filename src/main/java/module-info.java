@@ -3,6 +3,7 @@ module spartan.launcher {
   requires javassist;
   requires static logback.core;
   requires static logback.classic;
+  exports spartan_startup;
   exports spartan;
   exports spartan.annotations;
   exports spartan.fstreams;

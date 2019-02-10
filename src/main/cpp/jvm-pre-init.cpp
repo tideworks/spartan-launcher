@@ -58,6 +58,13 @@ static methodDescriptor make_ModuleLayer_findLoader_descriptor() {
       true, WM::NONE);
 }
 
+static methodDescriptor make_ClassLoader_loadClass_descriptor() {
+  return methodDescriptor(
+      "java/lang/ClassLoader/loadClass",
+      "(Ljava/lang/String;)Ljava/lang/Class;",
+      true, WM::NONE);
+}
+
 methodDescriptor jvm_pre_init_ctx::make_obtainSerializedAnnotationInfo_descriptor() {
   return methodDescriptor(
       "spartan_startup/CommandDispatchInfo/obtainSerializedSysPropertiesAndAnnotationInfo",
@@ -176,22 +183,55 @@ std::pair<shm::ShmAllocator *, bool> jvm_pre_init_ctx::pre_init_for_supervisor_j
     const char * const method_name_sav = _method_name;
 
     _class_name = module_layer_cls_name;
-    jcls = _env->GetObjectClass(module_layer_sp.get());
-    if (jcls == nullptr) throw 3;
+    auto const mod_layer_cls = _env->GetObjectClass(module_layer_sp.get());
+    if (mod_layer_cls == nullptr) throw 3;
 
     _method_name = findLoader_method;
-    jmethodID const mid = _env->GetMethodID(jcls, findLoader_method, find_loader.desc_str());
+    jmethodID mid = _env->GetMethodID(mod_layer_cls, findLoader_method, find_loader.desc_str());
     if (mid == nullptr) throw 4;
 
-    // TODO: finish implementing using ModuleLayer.findLoader() to load class and execute targted method
+    defer_jobj_t utf_str_sp{ _env->NewStringUTF("spartan.launcher"), defer_jobj };
+    if (!utf_str_sp) throw 3;
+
+    auto const spartan_module_cls_loader =  _env->CallObjectMethod(module_layer_sp.get(), mid, utf_str_sp.get());
+    defer_jobj_t spartan_module_cls_loader_sp{ spartan_module_cls_loader, defer_jobj };
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    if (was_exception_raised) {
+      return std::make_pair(nullptr, was_exception_raised);
+    }
+    if (spartan_module_cls_loader == nullptr) throw 3;
+
+    const methodDescriptor load_class{ make_ClassLoader_loadClass_descriptor() };
+    const char* const class_loader_cls_name = strdupa(load_class.c_str());
+    const char *const loadClass_method = split_method_name_from_class_name(class_loader_cls_name, load_class.c_str());
+
+    _class_name = class_loader_cls_name;
+    auto const cls_loader_cls = _env->GetObjectClass(spartan_module_cls_loader_sp.get());
+    if (cls_loader_cls == nullptr) throw 3;
+
+    _method_name = loadClass_method;
+    mid = _env->GetMethodID(cls_loader_cls, loadClass_method, load_class.desc_str());
+    if (mid == nullptr) throw 4;
 
     // restore state of these local variables
     _class_name  = class_name_sav;
     _method_name = method_name_sav;
+
+    std::string spartan_startup_cls_name{ _class_name };
+    std::replace( spartan_startup_cls_name.begin(), spartan_startup_cls_name.end(), '/', '.');
+
+    utf_str_sp.reset( _env->NewStringUTF(spartan_startup_cls_name.c_str()) );
+
+    jcls = (jclass) _env->CallObjectMethod(spartan_module_cls_loader_sp.get(), mid, utf_str_sp.get());
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    if (was_exception_raised) {
+      return std::make_pair(nullptr, was_exception_raised);
+    }
   } else {
     jcls = _env->FindClass(_class_name);
-    if (jcls == nullptr) throw 3;
   }
+
+  if (jcls == nullptr) throw 3;
 
   jmethodID const get_cmd_dispatch_info = _env->GetStaticMethodID(jcls, _method_name, method_descriptor.desc_str());
   if (get_cmd_dispatch_info == nullptr) throw 4;
