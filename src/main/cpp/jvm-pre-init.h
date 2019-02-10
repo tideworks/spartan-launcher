@@ -65,7 +65,6 @@ namespace jvm_pre_init {
     jvm_pre_init_ctx &operator=(jvm_pre_init_ctx &&) = delete;
     ~jvm_pre_init_ctx() = default;
   public:
-    static const char* split_method_name_from_class_name(const char *stfbuf, const char *full_method_name);
     static methodDescriptor make_obtainSerializedAnnotationInfo_descriptor();
     /**
      * A helper method that is called by invoke_java_method(..) to set the system class loader
@@ -87,8 +86,8 @@ namespace jvm_pre_init {
      * also returns a bool flag that will indicate if an Java exception has been thrown (the allocator
      * will be a nullptr if an exception was thrown)
      */
-    std::pair<shm::ShmAllocator *, bool> pre_init_for_supervisor_jvm(const methodDescriptorBase &method_descriptor,
-                                                                     sessionState &ss);
+    std::pair<shm::ShmAllocator*, bool> pre_init_for_supervisor_jvm(const methodDescriptorBase &method_descriptor,
+                                                                    sessionState &ss);
     /**
      * A helper method that is called to do a pre-initialization phase in child worker Java JVM
      * instance prior to invoking the child worker sub-command entry point method. Any by-int-value

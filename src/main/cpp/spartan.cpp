@@ -581,7 +581,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
   static const char * const ctor_name = "<init>";
   try {
     // get the fully qualified class/method name into two separate strings (may throw exception)
-    method_name = jvm_pre_init_ctx::split_method_name_from_class_name(class_name, full_method_name);
+    method_name = cmd_dsp::split_method_name_from_class_name(class_name, full_method_name);
 
     JNIEnv * const env = env_sp.get();
 

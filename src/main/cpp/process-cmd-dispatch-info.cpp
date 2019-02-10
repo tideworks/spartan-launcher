@@ -40,7 +40,9 @@ namespace cmd_dsp {
   static std::vector<char> serialize_session_state_to_membuf(const sessionState &ss);
 
   // implementation section
-  static const char java_string_descriptor[] = "Ljava/lang/String;";
+  static const char* const unexpected_err_fmt = "%s(): %d: unexpected error (program terminating):\n";
+  static const char* const java_string_descriptor = "Ljava/lang/String;";
+  static const char* const java_string_array_descriptor = "[Ljava/lang/String;";
 
   template<typename T>
   using defer_jobj_sp_t = std::unique_ptr<_jobject, T>;
@@ -64,31 +66,80 @@ namespace cmd_dsp {
     }
   }
 
-  shm::ShmAllocator* CmdDispatchInfoProcessor::process_initial_cmd_dispatch_info(
+  const char* split_method_name_from_class_name(const char* const stfbuf, const char* const full_method_name) {
+    char * str = const_cast<char*>(strrchr(stfbuf, '/'));
+    if (str == nullptr || *(str + 1) == '\0') throw std::string(full_method_name);
+    *str = '\0';  // null terminate the class name string
+    return ++str; // return the method name string
+  }
+
+  static methodDescriptor make_deserializeSystemProperties_descriptor() {
+    return methodDescriptor(
+        "spartan_startup/CommandDispatchInfo/deserializeSystemProperties",
+        "([B)[Ljava/lang/String;",
+        true, WM::NONE);
+  }
+
+  static methodDescriptor make_deserializeToAnnotationInfo_descriptor() {
+    return methodDescriptor(
+        "spartan_startup/CommandDispatchInfo/deserializeToAnnotationInfo",
+        "([B)Lspartan_startup/CommandDispatchInfo;",
+        true, WM::NONE);
+  }
+
+  std::pair<shm::ShmAllocator*, bool> CmdDispatchInfoProcessor::process_initial_cmd_dispatch_info(
       jbyteArray ser_module_paths, jbyteArray ser_cmd_dispatch_info)
   {
+    DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
+
 #ifdef _DEBUG
     debug_dump_sessionState(ss, 'B');
 #endif
 
-    auto const defer_jobj = [this](jobject p) { // cleanup of Java objects being locally retrieved and referenced
-      if (p != nullptr) {
-        env->DeleteLocalRef(p);
-      }
-    };
-    using defer_jobj_t = defer_jobj_sp_t<decltype(defer_jobj)>; // smart pointer type per locally accessing Java objects
+    // save state of these instance variables (may be referenced in caught exception handling in invoke_java_method())
+    const char* const class_name_sav  = _class_name;
+    const char* const method_name_sav = _method_name;
 
-    method_name = "deserializeSystemProperties";
-    jmethodID const deserialize_sys_props = env->GetStaticMethodID(cls, method_name, "([B)[Ljava/lang/String;");
+    const methodDescriptor deserSysProps{ make_deserializeSystemProperties_descriptor() };
+    const char* const deserSysProps_cls_name = strdupa(deserSysProps.c_str());
+    const char* const deserSysProps_mth_name = split_method_name_from_class_name(deserSysProps_cls_name,
+                                                                                 deserSysProps.c_str());
+
+    _method_name = deserSysProps_mth_name;
+    auto const deserialize_sys_props = _env->GetStaticMethodID(cls, deserSysProps_mth_name, deserSysProps.desc_str());
     if (deserialize_sys_props == nullptr) throw 4;
-    defer_jobj_t sp_sys_prop_strs(env->CallStaticObjectMethod(cls, deserialize_sys_props, ser_cmd_dispatch_info),
-                                  defer_jobj);
 
-    method_name = "deserializeToAnnotationInfo";
-    jmethodID const deserialize_cmd_dsp = env->GetStaticMethodID(cls, method_name, "([B)Lspartan/CommandDispatchInfo;");
+    int line_nbr = __LINE__ + 1;
+    auto const sys_prop_strs = _env->CallStaticObjectMethod(cls, deserialize_sys_props, ser_cmd_dispatch_info);
+    defer_jobj_t sp_sys_prop_strs(sys_prop_strs, defer_jobj);
+    bool was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    if (was_exception_raised) {
+      log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+      return std::make_pair(nullptr, was_exception_raised);
+    }
+
+    const methodDescriptor deserToAnnotationInfo{ make_deserializeToAnnotationInfo_descriptor() };
+    const char* const deserToAnnotationInfo_cls_name = strdupa(deserToAnnotationInfo.c_str());
+    const char* const deserToAnnotationInfo_mth_name = split_method_name_from_class_name(deserToAnnotationInfo_cls_name,
+                                                                                         deserToAnnotationInfo.c_str());
+
+    _method_name = deserToAnnotationInfo_mth_name;
+    auto const deserialize_cmd_dsp = _env->GetStaticMethodID(cls, deserToAnnotationInfo_mth_name,
+                                                                  deserToAnnotationInfo.desc_str());
     if (deserialize_cmd_dsp == nullptr) throw 4;
-    defer_jobj_t sp_cmd_dispatch_info(env->CallStaticObjectMethod(cls, deserialize_cmd_dsp, ser_cmd_dispatch_info),
-                                      defer_jobj);
+
+    line_nbr = __LINE__ + 1;
+    auto const cmd_dispatch_info = _env->CallStaticObjectMethod(cls, deserialize_cmd_dsp, ser_cmd_dispatch_info);
+    defer_jobj_t sp_cmd_dispatch_info(cmd_dispatch_info, defer_jobj);
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    if (was_exception_raised) {
+      log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+      return std::make_pair(nullptr, was_exception_raised);
+    }
+
+    // restore state of these instance variables
+    _class_name  = class_name_sav;
+    _method_name = method_name_sav;
 
 #ifdef _DEBUG
     debug_dump_dispatch_info(sp_cmd_dispatch_info.get());
@@ -108,8 +159,8 @@ namespace cmd_dsp {
     const auto ss_ser_membuf = serialize_session_state_to_membuf(ss);
 
     const auto pg_size = sysconf(_SC_PAGE_SIZE);
-    const auto byteArrayOneLen = env->GetArrayLength(ser_module_paths);
-    const auto byteArrayTwoLen = env->GetArrayLength(ser_cmd_dispatch_info);
+    const auto byteArrayOneLen = _env->GetArrayLength(ser_module_paths);
+    const auto byteArrayTwoLen = _env->GetArrayLength(ser_cmd_dispatch_info);
     const auto shm_required_size =  sizeof(int32_t) + byteArrayOneLen +
                                     sizeof(int32_t) + byteArrayTwoLen +
                                     sizeof(int32_t) + ss_ser_membuf.size();
@@ -125,13 +176,13 @@ namespace cmd_dsp {
     // append serialized module paths byte array
     *reinterpret_cast<int32_t*>(byte_mem_buf_pos) = byteArrayOneLen;
     byte_mem_buf_pos += sizeof(int32_t);
-    env->GetByteArrayRegion(ser_module_paths, 0, byteArrayOneLen, byte_mem_buf_pos);
+    _env->GetByteArrayRegion(ser_module_paths, 0, byteArrayOneLen, byte_mem_buf_pos);
     byte_mem_buf_pos += byteArrayOneLen;
 
     // append serialized command dispatch info byte array
     *reinterpret_cast<int32_t*>(byte_mem_buf_pos) = byteArrayTwoLen;
     byte_mem_buf_pos += sizeof(int32_t);
-    env->GetByteArrayRegion(ser_cmd_dispatch_info, 0, byteArrayTwoLen, byte_mem_buf_pos);
+    _env->GetByteArrayRegion(ser_cmd_dispatch_info, 0, byteArrayTwoLen, byte_mem_buf_pos);
     byte_mem_buf_pos += byteArrayTwoLen;
 
     // append serialized session state byte array
@@ -146,21 +197,23 @@ namespace cmd_dsp {
         std::get<1>(sp_shm_alloc->getUtilizedMemBuf()));
 #endif
 
-    return sp_shm_alloc.release();
+    return std::make_pair(sp_shm_alloc.release(), was_exception_raised);
   }
 
 #ifdef _DEBUG
   void CmdDispatchInfoProcessor::debug_dump_dispatch_info(jobject cmd_dispatch_info) {
     if (logger::get_level() > LL::DEBUG) return;
-    method_name = "toString";
-    jmethodID const to_string_method = env->GetMethodID(cls, method_name, "()Ljava/lang/String;");
+    const char* const method_name_sav = _method_name;
+    _method_name = "toString";
+    jmethodID const to_string_method = _env->GetMethodID(cls, _method_name, "()Ljava/lang/String;");
     if (to_string_method == nullptr) throw 4;
-    auto result = reinterpret_cast<jstring>(env->CallObjectMethod(cmd_dispatch_info, to_string_method));
+    auto result = reinterpret_cast<jstring>(_env->CallObjectMethod(cmd_dispatch_info, to_string_method));
     jstr_t jstr{ JNI_FALSE, result, nullptr };
-    jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
-    auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
+    jstr.c_str = _env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
+    auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(_env, p); };
     defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_cmd_dsp_info(&jstr, defer_cleanup_jstr);
     logm(LL::DEBUG, sp_cmd_dsp_info->c_str);
+    _method_name = method_name_sav;
   }
 #endif
 
@@ -186,8 +239,10 @@ namespace cmd_dsp {
   }
 
   void CmdDispatchInfoProcessor::apply_cmd_dsp_info_to_session_state(jobject sys_prop_strs, jobject cmd_dispatch_info) {
+    DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
+
     auto const sys_prop_strs_array = reinterpret_cast<jobjectArray>(sys_prop_strs);
-    process_jstring_array(env, sys_prop_strs_array,
+    process_jstring_array(_env, sys_prop_strs_array,
                           [this](int array_len) {
                             log(LL::DEBUG, "sys_prop_strs_array length: %d", array_len);
                             auto const pvec = new std::vector<std::string>();
@@ -196,27 +251,20 @@ namespace cmd_dsp {
                           },
                           [this](std::string &str) { ss.spSerializedSystemProperties->push_back(std::move(str)); });
 
-    auto field_id = env->GetFieldID(cls, "systemClassPath", "[Ljava/lang/String;");
+    auto field_id = _env->GetFieldID(cls, "systemClassPath", java_string_array_descriptor);
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
     assert(field_id != nullptr);
 #endif
 
-    auto const defer_jobj = [this](jobject p) { // cleanup of Java objects being locally retrieved and referenced
-      if (p != nullptr) {
-        env->DeleteLocalRef(p);
-      }
-    };
-    using defer_jobj_t = defer_jobj_sp_t<decltype(defer_jobj)>; // smart pointer type per locally accessing Java objects
-
     {
-      defer_jobj_t sp_cls_path_array(env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
+      defer_jobj_t sp_cls_path_array(_env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
 
       std::string cls_path_str;
       cls_path_str.reserve(2048);
       auto const cls_path_array = reinterpret_cast<jobjectArray>(sp_cls_path_array.get());
-      process_jstring_array(env, cls_path_array,
+      process_jstring_array(_env, cls_path_array,
                             [](int array_len) {},
                             [&cls_path_str](std::string &str) {
                               if (!cls_path_str.empty()) {
@@ -233,29 +281,29 @@ namespace cmd_dsp {
     }
 
     {
-      field_id = env->GetFieldID(cls, "spartanSupervisorCommands", "[Lspartan/CommandDispatchInfo$CmdInfo;");
+      field_id = _env->GetFieldID(cls, "spartanSupervisorCommands", "[Lspartan/CommandDispatchInfo$CmdInfo;");
 #ifdef NDEBUG
       if (field_id == nullptr) throw -1;
 #else
       assert(field_id != nullptr);
 #endif
 
-      defer_jobj_t sp_supervisor_cmds(env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
+      defer_jobj_t sp_supervisor_cmds(_env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
       auto const supervisor_cmds_array = reinterpret_cast<jobjectArray>(sp_supervisor_cmds.get());
-      const auto array_len = env->GetArrayLength(supervisor_cmds_array);
+      const auto array_len = _env->GetArrayLength(supervisor_cmds_array);
       if (array_len > 0) {
         log(LL::DEBUG, "supervisor_cmds_array length: %d", array_len);
         auto const pvec = new std::vector<methodDescriptorCmd>();
         pvec->reserve(static_cast<size_t >(array_len));
         ss.spSpartanSupervisorCommands.reset(pvec);
-        // setup this->class_name to reference the Java class for accessing a supervisor CmdInfo
-        const char * const cls_name_sav = class_name;
-        class_name = "spartan/CommandDispatchInfo$CmdInfo";
+        // setup this->_class_name to reference the Java class for accessing a supervisor CmdInfo
+        const char* const cls_name_sav = _class_name;
+        _class_name = "spartan/CommandDispatchInfo$CmdInfo";
         std::string method_name_str, descriptor_str, command_str;
         for (int i = 0; i < array_len; i++) {
           method_name_str.clear();
           descriptor_str.clear();
-          defer_jobj_t sp_supervisor_cmd(env->GetObjectArrayElement(supervisor_cmds_array, i), defer_jobj);
+          defer_jobj_t sp_supervisor_cmd(_env->GetObjectArrayElement(supervisor_cmds_array, i), defer_jobj);
           auto const cmd_info_cls = extract_method_info(sp_supervisor_cmd.get(),
                                                         [&method_name_str, &descriptor_str]
                                                             (std::string &method_name, std::string &descriptor) {
@@ -270,32 +318,32 @@ namespace cmd_dsp {
                                              std::move(command_str), false, WM::SUPERVISOR_DO_CMD);
           ss.spSpartanSupervisorCommands->push_back(std::move(supervisor_cmd));
         }
-        class_name = cls_name_sav;
+        _class_name = cls_name_sav;
       }
     }
 
     {
-      field_id = env->GetFieldID(cls, "spartanChildWorkerCommands", "[Lspartan/CommandDispatchInfo$ChildCmdInfo;");
+      field_id = _env->GetFieldID(cls, "spartanChildWorkerCommands", "[Lspartan/CommandDispatchInfo$ChildCmdInfo;");
 #ifdef NDEBUG
       if (field_id == nullptr) throw -1;
 #else
       assert(field_id != nullptr);
 #endif
 
-      defer_jobj_t sp_child_worker_cmds(env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
+      defer_jobj_t sp_child_worker_cmds(_env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
       auto const child_worker_cmds_array = reinterpret_cast<jobjectArray>(sp_child_worker_cmds.get());
-      const auto array_len = env->GetArrayLength(child_worker_cmds_array);
+      const auto array_len = _env->GetArrayLength(child_worker_cmds_array);
       if (array_len > 0) {
         log(LL::DEBUG, "child_worker_cmds_array length: %d", array_len);
         auto const pvec = new std::vector<methodDescriptorCmd>();
         pvec->reserve(static_cast<size_t >(array_len));
         ss.spSpartanChildProcessorCommands.reset(pvec);
-        // setup this->class_name to reference the Java class for accessing a child worker ChildCmdInfo
-        const char * const cls_name_sav = class_name;
-        class_name = "spartan/CommandDispatchInfo$ChildCmdInfo";
+        // setup this->_class_name to reference the Java class for accessing a child worker ChildCmdInfo
+        const char* const cls_name_sav = _class_name;
+        _class_name = "spartan/CommandDispatchInfo$ChildCmdInfo";
         std::string method_name_str, descriptor_str, command_str, jvm_optns_str;
         for (int i = 0; i < array_len; i++) {
-          defer_jobj_t sp_child_worker_cmd(env->GetObjectArrayElement(child_worker_cmds_array, i), defer_jobj);
+          defer_jobj_t sp_child_worker_cmd(_env->GetObjectArrayElement(child_worker_cmds_array, i), defer_jobj);
           method_name_str.clear();
           descriptor_str.clear();
           auto const cmd_info_cls = extract_method_info(sp_child_worker_cmd.get(),
@@ -318,40 +366,35 @@ namespace cmd_dsp {
                                                true, WM::CHILD_DO_CMD);
           ss.spSpartanChildProcessorCommands->push_back(std::move(child_worker_cmd));
         }
-        class_name = cls_name_sav;
+        _class_name = cls_name_sav;
       }
     }
   }
 
   void CmdDispatchInfoProcessor::extract_main_entry_method_info(jobject cmd_dispatch_info) {
-    auto const defer_jobj = [this](jobject p) { // cleanup of Java objects being locally retrieved and referenced
-      if (p != nullptr) {
-        env->DeleteLocalRef(p);
-      }
-    };
-    using defer_jobj_t = defer_jobj_sp_t<decltype(defer_jobj)>; // smart pointer type per locally accessing Java objects
+    DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
 
-    auto field_id = env->GetFieldID(cls, "spartanMainEntryPoint", "Lspartan/CommandDispatchInfo$MethInfo;");
+    auto field_id = _env->GetFieldID(cls, "spartanMainEntryPoint", "Lspartan/CommandDispatchInfo$MethInfo;");
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
     assert(field_id != nullptr);
 #endif
 
-    defer_jobj_t sp_main_entry_method_info(env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
+    defer_jobj_t sp_main_entry_method_info(_env->GetObjectField(cmd_dispatch_info, field_id), defer_jobj);
     if (!sp_main_entry_method_info) {
       std::string err_msg{"no main() entry method defined in either config.ini or via @SupervisorMain annotation"};
       throw invalid_initialization_exception(std::move(err_msg));
     }
 
-    // setup this->class_name to reference the Java class for accessing a plain MethInfo
-    const char * const cls_name_sav = class_name;
-    class_name = "spartan/CommandDispatchInfo$MethInfo";
+    // setup this->_class_name to reference the Java class for accessing a plain MethInfo
+    const char* const cls_name_sav = _class_name;
+    _class_name = "spartan/CommandDispatchInfo$MethInfo";
     extract_method_info(sp_main_entry_method_info.get(), [this](std::string &method_name, std::string &descriptor) {
       methodDescriptor main_entry(std::move(method_name), std::move(descriptor), true, WhichMethod::MAIN);
       ss.spartanMainEntryPoint = std::move(main_entry);
     });
-    class_name = cls_name_sav;
+    _class_name = cls_name_sav;
 
     // extract the class name from the fully qualified main entry point method name
     std::string cls_name_str = [](const char *const full_entry_point_name) -> std::string {
@@ -388,10 +431,10 @@ namespace cmd_dsp {
   jclass CmdDispatchInfoProcessor::extract_method_info(jobject method_info,
                                                        const std::function<void(std::string&, std::string&)> &action)
   {
-    jclass const meth_info_cls = env->FindClass(class_name); // was set by caller to appropriate MethInfo class name
+    jclass const meth_info_cls = _env->FindClass(_class_name); // was set by caller to appropriate MethInfo class name
     if (cls == nullptr) throw 3;
 
-    auto field_id = env->GetFieldID(meth_info_cls, "className", java_string_descriptor);
+    auto field_id = _env->GetFieldID(meth_info_cls, "className", java_string_descriptor);
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
@@ -400,17 +443,17 @@ namespace cmd_dsp {
 
     std::string main_entry_str, descriptor_str;
 
-    auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
+    auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(_env, p); };
     jstr_t jstr{ JNI_FALSE, nullptr, nullptr };
-    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_info, field_id));
-    jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
+    jstr.j_str = reinterpret_cast<jstring>(_env->GetObjectField(method_info, field_id));
+    jstr.c_str = _env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
     main_entry_str = sp_jstr->c_str;
     (void) sp_jstr.release();
     replace(main_entry_str.begin(), main_entry_str.end(), '.', '/');
     main_entry_str += '/';
 
-    field_id = env->GetFieldID(meth_info_cls, "methodName", java_string_descriptor);
+    field_id = _env->GetFieldID(meth_info_cls, "methodName", java_string_descriptor);
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
@@ -419,13 +462,13 @@ namespace cmd_dsp {
 
     jstr.isCopy = JNI_FALSE;
     jstr.c_str = nullptr;
-    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_info, field_id));
-    jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
+    jstr.j_str = reinterpret_cast<jstring>(_env->GetObjectField(method_info, field_id));
+    jstr.c_str = _env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     sp_jstr.reset(&jstr);
     main_entry_str += sp_jstr->c_str;
     (void) sp_jstr.release();
 
-    field_id = env->GetFieldID(meth_info_cls, "descriptor", java_string_descriptor);
+    field_id = _env->GetFieldID(meth_info_cls, "descriptor", java_string_descriptor);
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
@@ -434,8 +477,8 @@ namespace cmd_dsp {
 
     jstr.isCopy = JNI_FALSE;
     jstr.c_str = nullptr;
-    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_info, field_id));
-    jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
+    jstr.j_str = reinterpret_cast<jstring>(_env->GetObjectField(method_info, field_id));
+    jstr.c_str = _env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     sp_jstr.reset(&jstr);
     descriptor_str = sp_jstr->c_str;
     (void) sp_jstr.release();
@@ -448,17 +491,17 @@ namespace cmd_dsp {
   void CmdDispatchInfoProcessor::extract_method_cmd_info(jclass cmd_info_cls, jobject method_cmd_info,
                                                          const std::function<void(std::string &command)> &action)
   {
-    const auto field_id = env->GetFieldID(cmd_info_cls, "cmd", java_string_descriptor);
+    const auto field_id = _env->GetFieldID(cmd_info_cls, "cmd", java_string_descriptor);
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
     assert(field_id != nullptr);
 #endif
 
-    auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
+    auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(_env, p); };
     jstr_t jstr{ JNI_FALSE, nullptr, nullptr };
-    jstr.j_str = reinterpret_cast<jstring>(env->GetObjectField(method_cmd_info, field_id));
-    jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
+    jstr.j_str = reinterpret_cast<jstring>(_env->GetObjectField(method_cmd_info, field_id));
+    jstr.c_str = _env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
     defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
 
     std::string command(sp_jstr->c_str);
@@ -468,14 +511,9 @@ namespace cmd_dsp {
   void CmdDispatchInfoProcessor::extract_method_jvm_optns_cmd_info(jclass cmd_info_cls, jobject method_cmd_info,
                                                                    const std::function<void(std::string &)> &action)
   {
-    auto const defer_jobj = [this](jobject p) { // cleanup of Java objects being locally retrieved and referenced
-      if (p != nullptr) {
-        env->DeleteLocalRef(p);
-      }
-    };
-    using defer_jobj_t = defer_jobj_sp_t<decltype(defer_jobj)>; // smart pointer type per locally accessing Java objects
+    DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
 
-    const auto field_id = env->GetFieldID(cmd_info_cls, "jvmArgs", "[Ljava/lang/String;");
+    const auto field_id = _env->GetFieldID(cmd_info_cls, "jvmArgs", java_string_array_descriptor);
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
@@ -484,17 +522,17 @@ namespace cmd_dsp {
 
     std::string jvm_optns_str;
 
-    defer_jobj_t sp_jvm_optns(env->GetObjectField(method_cmd_info, field_id), defer_jobj);
+    defer_jobj_t sp_jvm_optns(_env->GetObjectField(method_cmd_info, field_id), defer_jobj);
     auto const jvm_optns_array = reinterpret_cast<jobjectArray>(sp_jvm_optns.get());
-    const auto array_len = env->GetArrayLength(jvm_optns_array);
+    const auto array_len = _env->GetArrayLength(jvm_optns_array);
     if (array_len > 0) {
       jvm_optns_str.reserve(2048);
-      auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(env, p); };
+      auto const defer_cleanup_jstr = [this](jstr_t *p) { cleanup_jstr_t(_env, p); };
       jstr_t jstr{JNI_FALSE, nullptr, nullptr};
       for(int i = 0; i < array_len; i++) {
         jstr.isCopy = JNI_FALSE;
-        jstr.j_str = reinterpret_cast<jstring>(env->GetObjectArrayElement(jvm_optns_array, i));
-        jstr.c_str = env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
+        jstr.j_str = reinterpret_cast<jstring>(_env->GetObjectArrayElement(jvm_optns_array, i));
+        jstr.c_str = _env->GetStringUTFChars(jstr.j_str, &jstr.isCopy);
         defer_jstr_sp_t<decltype(defer_cleanup_jstr)> sp_jstr(&jstr, defer_cleanup_jstr);
         if (!jvm_optns_str.empty()) {
           jvm_optns_str += ' ';
@@ -593,4 +631,5 @@ namespace cmd_dsp {
     }
     return cmds_set;
   }
+
 } // namespace cmd_dsp

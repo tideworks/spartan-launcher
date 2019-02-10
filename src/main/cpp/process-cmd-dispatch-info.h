@@ -22,6 +22,7 @@ limitations under the License.
 #include <functional>
 #include <unordered_set>
 #include <jni.h>
+#include <utility>
 #include "shm.h"
 
 // forward declarations (dependency types for method signature declarations)
@@ -31,15 +32,16 @@ namespace cmd_dsp {
 
   class CmdDispatchInfoProcessor {
   private:
-    JNIEnv * const env;
-    const char *&class_name;
-    const char *&method_name;
+    JNIEnv * const _env;
+    const char *&_class_name;
+    const char *&_method_name;
     jclass const cls;
     sessionState &ss;
   public:
     CmdDispatchInfoProcessor(JNIEnv *env, const char *&cls_name, const char *&meth_name, jclass cls, sessionState &ss) :
-        env(env), class_name(cls_name), method_name(meth_name), cls(cls), ss(ss) {}
-    shm::ShmAllocator* process_initial_cmd_dispatch_info(jbyteArray ser_module_paths, jbyteArray ser_cmd_dispatch_info);
+        _env(env), _class_name(cls_name), _method_name(meth_name), cls(cls), ss(ss) {}
+    std::pair<shm::ShmAllocator*, bool> process_initial_cmd_dispatch_info(jbyteArray ser_module_paths,
+                                                                          jbyteArray ser_cmd_dispatch_info);
   private:
 #ifdef _DEBUG
     void debug_dump_dispatch_info(jobject cmd_dispatch_info);
@@ -53,9 +55,18 @@ namespace cmd_dsp {
                                            const std::function<void(std::string &)> &action);
   };
 
+  const char* split_method_name_from_class_name(const char *const stfbuf, const char *const full_method_name);
   void unmap_shm_client(void *p, size_t shm_size);
   void get_cmd_dispatch_info(sessionState &ss);
   std::unordered_set<std::string> get_child_processor_commands(const sessionState &ss);
 }
+
+#define DECL_DEFER_SMART_PTR(type_name, cleanup_callback)\
+  auto const cleanup_callback = [this](jobject p) {\
+    if (p != nullptr) {\
+      this->_env->DeleteLocalRef(p);\
+    }\
+  };\
+  using type_name = std::unique_ptr<_jobject, decltype(cleanup_callback)>
 
 #endif //SPARTAN_PROCESS_CMD_DISPATCH_INFO_H
