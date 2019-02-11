@@ -87,6 +87,34 @@ namespace cmd_dsp {
         true, WM::NONE);
   }
 
+  static methodDescriptor make_systemClassPath_descriptor() {
+    return methodDescriptor(
+        "spartan_startup/CommandDispatchInfo/systemClassPath",
+        java_string_array_descriptor,
+        false, WM::NONE);
+  }
+
+  static methodDescriptor make_spartanSupervisorCommands_descriptor() {
+    return methodDescriptor(
+        "spartan_startup/CommandDispatchInfo/spartanSupervisorCommands",
+        "[Lspartan_startup/CommandDispatchInfo$CmdInfo;",
+        false, WM::NONE);
+  }
+
+  static methodDescriptor make_spartanChildWorkerCommands_descriptor() {
+    return methodDescriptor(
+        "spartan_startup/CommandDispatchInfo/spartanChildWorkerCommands",
+        "[Lspartan_startup/CommandDispatchInfo$ChildCmdInfo;",
+        false, WM::NONE);
+  }
+
+  static methodDescriptor make_spartanMainEntryPoint_descriptor() {
+    return methodDescriptor(
+        "spartan_startup/CommandDispatchInfo/spartanMainEntryPoint",
+        "Lspartan_startup/CommandDispatchInfo$MethInfo;",
+        false, WM::NONE);
+  }
+
   std::pair<shm::ShmAllocator*, bool> CmdDispatchInfoProcessor::process_initial_cmd_dispatch_info(
       jbyteArray ser_module_paths, jbyteArray ser_cmd_dispatch_info)
   {
@@ -251,7 +279,11 @@ namespace cmd_dsp {
                           },
                           [this](std::string &str) { ss.spSerializedSystemProperties->push_back(std::move(str)); });
 
-    auto field_id = _env->GetFieldID(cls, "systemClassPath", java_string_array_descriptor);
+    const methodDescriptor sysClsPath{ make_systemClassPath_descriptor() };
+    const char* const sysClsPath_cls_name = strdupa(sysClsPath.c_str());
+    const char* const sysClsPath_mth_name = split_method_name_from_class_name(sysClsPath_cls_name, sysClsPath.c_str());
+
+    auto field_id = _env->GetFieldID(cls, sysClsPath_mth_name, sysClsPath.desc_str());
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
@@ -281,7 +313,12 @@ namespace cmd_dsp {
     }
 
     {
-      field_id = _env->GetFieldID(cls, "spartanSupervisorCommands", "[Lspartan/CommandDispatchInfo$CmdInfo;");
+      const methodDescriptor sprtnSupervisorCmds { make_spartanSupervisorCommands_descriptor() };
+      const char* const sprtnSupervisorCmds_cls_name = strdupa(sprtnSupervisorCmds.c_str());
+      const char* const sprtnSupervisorCmds_mth_name = split_method_name_from_class_name(sprtnSupervisorCmds_cls_name,
+                                                                                         sprtnSupervisorCmds.c_str());
+
+      field_id = _env->GetFieldID(cls, sprtnSupervisorCmds_mth_name, sprtnSupervisorCmds.desc_str());
 #ifdef NDEBUG
       if (field_id == nullptr) throw -1;
 #else
@@ -298,32 +335,38 @@ namespace cmd_dsp {
         ss.spSpartanSupervisorCommands.reset(pvec);
         // setup this->_class_name to reference the Java class for accessing a supervisor CmdInfo
         const char* const cls_name_sav = _class_name;
-        _class_name = "spartan/CommandDispatchInfo$CmdInfo";
+        _class_name = "spartan_startup/CommandDispatchInfo$CmdInfo";
         std::string method_name_str, descriptor_str, command_str;
         for (int i = 0; i < array_len; i++) {
           method_name_str.clear();
           descriptor_str.clear();
-          defer_jobj_t sp_supervisor_cmd(_env->GetObjectArrayElement(supervisor_cmds_array, i), defer_jobj);
+          auto const supervisor_cmd_jobj = _env->GetObjectArrayElement(supervisor_cmds_array, i);
+          defer_jobj_t sp_supervisor_cmd(supervisor_cmd_jobj, defer_jobj);
           auto const cmd_info_cls = extract_method_info(sp_supervisor_cmd.get(),
                                                         [&method_name_str, &descriptor_str]
-                                                            (std::string &method_name, std::string &descriptor) {
+                                                            (std::string &method_name, std::string &descriptor)
+                                                        {
                                                           method_name_str = std::move(method_name);
-                                                          descriptor_str = std::move(descriptor);
+                                                          descriptor_str  = std::move(descriptor);
                                                         });
           command_str.clear();
           extract_method_cmd_info(cmd_info_cls, sp_supervisor_cmd.get(), [&command_str](std::string &command) {
             command_str = std::move(command);
           });
-          methodDescriptorCmd supervisor_cmd(std::move(method_name_str), std::move(descriptor_str),
-                                             std::move(command_str), false, WM::SUPERVISOR_DO_CMD);
-          ss.spSpartanSupervisorCommands->push_back(std::move(supervisor_cmd));
+          ss.spSpartanSupervisorCommands->emplace_back(std::move(method_name_str), std::move(descriptor_str),
+                                                       std::move(command_str), false, WM::SUPERVISOR_DO_CMD);
         }
         _class_name = cls_name_sav;
       }
     }
 
     {
-      field_id = _env->GetFieldID(cls, "spartanChildWorkerCommands", "[Lspartan/CommandDispatchInfo$ChildCmdInfo;");
+      const methodDescriptor sprtnChildWrkrCmds{ make_spartanChildWorkerCommands_descriptor() };
+      const char* const sprtnChildWrkrCmds_cls_name = strdupa(sprtnChildWrkrCmds.c_str());
+      const char* const sprtnChildWrkrCmds_mth_name = split_method_name_from_class_name(sprtnChildWrkrCmds_cls_name,
+                                                                                        sprtnChildWrkrCmds.c_str());
+
+      field_id = _env->GetFieldID(cls, sprtnChildWrkrCmds_mth_name, sprtnChildWrkrCmds.desc_str());
 #ifdef NDEBUG
       if (field_id == nullptr) throw -1;
 #else
@@ -340,7 +383,7 @@ namespace cmd_dsp {
         ss.spSpartanChildProcessorCommands.reset(pvec);
         // setup this->_class_name to reference the Java class for accessing a child worker ChildCmdInfo
         const char* const cls_name_sav = _class_name;
-        _class_name = "spartan/CommandDispatchInfo$ChildCmdInfo";
+        _class_name = "spartan_startup/CommandDispatchInfo$ChildCmdInfo";
         std::string method_name_str, descriptor_str, command_str, jvm_optns_str;
         for (int i = 0; i < array_len; i++) {
           defer_jobj_t sp_child_worker_cmd(_env->GetObjectArrayElement(child_worker_cmds_array, i), defer_jobj);
@@ -361,10 +404,9 @@ namespace cmd_dsp {
                                             [&jvm_optns_str](std::string &jvm_optns) {
                                               jvm_optns_str = std::move(jvm_optns);
                                             });
-          methodDescriptorCmd child_worker_cmd(std::move(method_name_str), std::move(descriptor_str),
-                                               std::move(command_str), std::move(jvm_optns_str),
-                                               true, WM::CHILD_DO_CMD);
-          ss.spSpartanChildProcessorCommands->push_back(std::move(child_worker_cmd));
+          ss.spSpartanChildProcessorCommands->emplace_back(std::move(method_name_str), std::move(descriptor_str),
+                                                           std::move(command_str), std::move(jvm_optns_str),
+                                                           true, WM::CHILD_DO_CMD);
         }
         _class_name = cls_name_sav;
       }
@@ -374,7 +416,12 @@ namespace cmd_dsp {
   void CmdDispatchInfoProcessor::extract_main_entry_method_info(jobject cmd_dispatch_info) {
     DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
 
-    auto field_id = _env->GetFieldID(cls, "spartanMainEntryPoint", "Lspartan/CommandDispatchInfo$MethInfo;");
+    const methodDescriptor spartanMainEntryPoint{ make_spartanMainEntryPoint_descriptor() };
+    const char* const spartanMainEntryPoint_cls_name = strdupa(spartanMainEntryPoint.c_str());
+    const char* const spartanMainEntryPoint_mth_name = split_method_name_from_class_name(spartanMainEntryPoint_cls_name,
+                                                                                         spartanMainEntryPoint.c_str());
+
+    auto field_id = _env->GetFieldID(cls, spartanMainEntryPoint_mth_name, spartanMainEntryPoint.desc_str());
 #ifdef NDEBUG
     if (field_id == nullptr) throw -1;
 #else
@@ -389,7 +436,7 @@ namespace cmd_dsp {
 
     // setup this->_class_name to reference the Java class for accessing a plain MethInfo
     const char* const cls_name_sav = _class_name;
-    _class_name = "spartan/CommandDispatchInfo$MethInfo";
+    _class_name = "spartan_startup/CommandDispatchInfo$MethInfo";
     extract_method_info(sp_main_entry_method_info.get(), [this](std::string &method_name, std::string &descriptor) {
       methodDescriptor main_entry(std::move(method_name), std::move(descriptor), true, WhichMethod::MAIN);
       ss.spartanMainEntryPoint = std::move(main_entry);
