@@ -109,9 +109,9 @@ methodDescriptor & methodDescriptor::operator=(methodDescriptor && md) noexcept 
 }
 
 methodDescriptorCmd & methodDescriptorCmd::operator=(methodDescriptorCmd && md) noexcept {
-  methodDescriptor::operator=(std::move(md));
   command = std::move(md.command);
   jvmOptionsCommandLine = std::move(md.jvmOptionsCommandLine);
+  methodDescriptor::operator=(std::move(md));
   return *this;
 }
 
@@ -677,6 +677,13 @@ static string_view prepend_to_java_library_path(const string_view jvm_cmd_line_a
     }
   };
 
+  // command line option -Djava.library.path not found so synthesize one with the executable's path as its value
+  auto const append_java_lib_path_optn = [&rtn_str, executable_path_strv]() {
+    rtn_str += ' ';
+    rtn_str += java_lib_path_optn_strv.c_str();
+    rtn_str += executable_path_strv.c_str();
+  };
+
   if (!jvm_cmd_line_args.empty()) {
     int argc = 0;
     const char**argv = nullptr;
@@ -748,16 +755,14 @@ static string_view prepend_to_java_library_path(const string_view jvm_cmd_line_a
       // append the input JVM command line string as is into the string buffer
       rtn_str += ' ';
       rtn_str += jvm_cmd_line_args.c_str();
+      append_java_lib_path_optn();
     }
 
     log_returned_jvm_cmd_line_args();
     return string_view{strndup(rtn_str.c_str(), rtn_str.size()), rtn_str.size()}; // return the updated JVM command line
   }
 
-  // command line option -Djava.library.path not found so synthesize one with the executable's path as its value
-  rtn_str += ' ';
-  rtn_str += java_lib_path_optn_strv.c_str();
-  rtn_str += executable_path_strv.c_str();
+  append_java_lib_path_optn();
 
   log_returned_jvm_cmd_line_args();
   return string_view{strndup(rtn_str.c_str(), rtn_str.size()), rtn_str.size()}; // return the updated JVM command line

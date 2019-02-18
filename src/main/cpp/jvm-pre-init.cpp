@@ -31,6 +31,7 @@ using namespace bpstd;
 using cmd_dsp::split_method_name_from_class_name;
 
 static const char* const unexpected_err_fmt = "%s(): %d: unexpected error (program terminating):\n";
+static const char* const spartan_launcher_module_name = "spartan.launcher";
 
 /**
  * The below class methods are only invoked as helper methods from the
@@ -44,7 +45,7 @@ static methodDescriptor make_ModuleLayer_findLoader_descriptor() {
       false, WM::NONE);
 }
 
-static methodDescriptor make_ClassLoader_loadClass_descriptor() {
+methodDescriptor jvm_pre_init_ctx::make_ClassLoader_loadClass_descriptor() {
   return methodDescriptor(
       "java/lang/ClassLoader/loadClass",
       "(Ljava/lang/String;)Ljava/lang/Class;",
@@ -87,47 +88,73 @@ static methodDescriptor make_System_bootLayer_descriptor() {
 }
 
 /**
- * A helper method that is called by invoke_java_method(..) to set the system class loader
- * as the current thread class loader. Any by-int-value exceptions thrown are handled in
- * the function invoke_java_method(..).
+ * A helper method that is called by invoke_java_method(..) to set an appropriate class loader
+ * as the current thread class loader. Any by-int-value exceptions thrown are handled in the
+ * function invoke_java_method(..).
+ *
+ * @return pair result consisting of module layer class loader (or null if no module layer is
+ * in effect) and a flag which will indicate if an Java exception has been thrown
  */
-void jvm_pre_init_ctx::set_thread_class_loader_context() {
+std::pair<jobject, bool> jvm_pre_init_ctx::set_thread_class_loader_context() {
   DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
+
+  bool was_exception_raised = false;
 
   // save state of these instance variables (may be referenced in caught exception handling in invoke_java_method())
   const char* const class_name_sav  = _class_name;
   const char* const method_name_sav = _method_name;
 
-  _class_name = "java/lang/ClassLoader";
-  jclass const clsLdr_cls = _env->FindClass(_class_name);
-  if (clsLdr_cls == nullptr) throw 3;
-  _method_name = "getSystemClassLoader";
-  jmethodID const getSysClsLdr = _env->GetStaticMethodID(clsLdr_cls, _method_name, "()Ljava/lang/ClassLoader;");
-  if (getSysClsLdr == nullptr) throw 4;
+  defer_jobj_t cls_ldr_obj_sp{ nullptr, defer_jobj };
 
-  // get system class loader
-  defer_jobj_t cls_ldr_obj_sp(_env->CallStaticObjectMethod(clsLdr_cls, getSysClsLdr), defer_jobj);
+  if (this->whichMethod == WM::MAIN || this->whichMethod == WM::CHILD_DO_CMD) {
+    const auto rslt = get_module_layer_class_loader();
+    cls_ldr_obj_sp.reset(std::get<0>(rslt));
+    was_exception_raised = std::get<1>(rslt);
+  }
 
-  _class_name = "java/lang/Thread";
-  jclass const thrd_cls = _env->FindClass(_class_name);
-  if (thrd_cls == nullptr) throw 3;
-  _method_name = "currentThread";
-  jmethodID const currThrd = _env->GetStaticMethodID(thrd_cls, _method_name, "()Ljava/lang/Thread;");
-  if (currThrd == nullptr) throw 4;
+  if (!cls_ldr_obj_sp && !was_exception_raised) {
+    _class_name = "java/lang/ClassLoader";
+    jclass const clsLdr_cls = _env->FindClass(_class_name);
+    if (clsLdr_cls == nullptr) throw 3;
 
-  // get current thread object
-  defer_jobj_t curr_thrd_obj_sp(_env->CallStaticObjectMethod(thrd_cls, currThrd), defer_jobj);
+    _method_name = "getSystemClassLoader";
+    jmethodID const getSysClsLdr = _env->GetStaticMethodID(clsLdr_cls, _method_name, "()Ljava/lang/ClassLoader;");
+    if (getSysClsLdr == nullptr) throw 4;
 
-  _method_name = "setContextClassLoader";
-  jmethodID const set_cntx_cls_ldr = _env->GetMethodID(thrd_cls, _method_name, "(Ljava/lang/ClassLoader;)V");
-  if (set_cntx_cls_ldr == nullptr) throw 4;
+    // get system class loader
+    cls_ldr_obj_sp.reset(_env->CallStaticObjectMethod(clsLdr_cls, getSysClsLdr));
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+  }
 
-  // now set the system class loader on the current thread object as the thread's context class loader
-  _env->CallVoidMethod(curr_thrd_obj_sp.get(), set_cntx_cls_ldr, cls_ldr_obj_sp.get());
+  if (!was_exception_raised) {
+    _class_name = "java/lang/Thread";
+    jclass const thrd_cls = _env->FindClass(_class_name);
+    if (thrd_cls == nullptr) throw 3;
+
+    _method_name = "currentThread";
+    jmethodID const currThrd = _env->GetStaticMethodID(thrd_cls, _method_name, "()Ljava/lang/Thread;");
+    if (currThrd == nullptr) throw 4;
+
+    // get current thread object
+    defer_jobj_t curr_thrd_obj_sp(_env->CallStaticObjectMethod(thrd_cls, currThrd), defer_jobj);
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+
+    if (!was_exception_raised) {
+      _method_name = "setContextClassLoader";
+      jmethodID const set_cntx_cls_ldr = _env->GetMethodID(thrd_cls, _method_name, "(Ljava/lang/ClassLoader;)V");
+      if (set_cntx_cls_ldr == nullptr) throw 4;
+
+      // now set the obtained class loader on the current thread object as the thread's context class loader
+      _env->CallVoidMethod(curr_thrd_obj_sp.get(), set_cntx_cls_ldr, cls_ldr_obj_sp.get());
+      was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    }
+  }
 
   // restore state of these instance variables
-  _class_name  = class_name_sav;
+  _class_name = class_name_sav;
   _method_name = method_name_sav;
+
+  return std::make_pair(cls_ldr_obj_sp.release(), was_exception_raised);
 }
 
 /**
@@ -177,18 +204,28 @@ std::pair<shm::ShmAllocator*, bool> jvm_pre_init_ctx::pre_init_for_supervisor_jv
     jmethodID mid = _env->GetMethodID(mod_layer_cls, findLoader_method, find_loader.desc_str());
     if (mid == nullptr) throw 4;
 
-    defer_jobj_t utf_str_sp{ _env->NewStringUTF("spartan.launcher"), defer_jobj };
-    if (!utf_str_sp) throw 3;
+    line_nbr = __LINE__ + 1;
+    defer_jobj_t utf_str_sp{ _env->NewStringUTF(spartan_launcher_module_name), defer_jobj };
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    if (was_exception_raised || !utf_str_sp) {
+      // restore state of these instance variables
+      _class_name  = class_name_sav;
+      _method_name = method_name_sav;
+      log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+      return std::make_pair(nullptr, true);
+    }
 
     line_nbr = __LINE__ + 1;
     auto const spartan_module_cls_loader =  _env->CallObjectMethod(module_layer_sp.get(), mid, utf_str_sp.get());
     defer_jobj_t spartan_module_cls_loader_sp{ spartan_module_cls_loader, defer_jobj };
     was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
-    if (was_exception_raised) {
+    if (was_exception_raised || !spartan_module_cls_loader_sp) {
+      // restore state of these instance variables
+      _class_name  = class_name_sav;
+      _method_name = method_name_sav;
       log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
-      return std::make_pair(nullptr, was_exception_raised);
+      return std::make_pair(nullptr, true);
     }
-    if (spartan_module_cls_loader == nullptr) throw 3;
 
     const methodDescriptor load_class{ make_ClassLoader_loadClass_descriptor() };
     const char* const class_loader_cls_name = strdupa(load_class.c_str());
@@ -209,14 +246,20 @@ std::pair<shm::ShmAllocator*, bool> jvm_pre_init_ctx::pre_init_for_supervisor_jv
     std::string spartan_startup_cls_name{ _class_name };
     std::replace( spartan_startup_cls_name.begin(), spartan_startup_cls_name.end(), '/', '.');
 
+    line_nbr = __LINE__ + 1;
     utf_str_sp.reset( _env->NewStringUTF(spartan_startup_cls_name.c_str()) );
+    was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+    if (was_exception_raised || !utf_str_sp) {
+      log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+      return std::make_pair(nullptr, true);
+    }
 
     line_nbr = __LINE__ + 1;
     jcls = (jclass) _env->CallObjectMethod(spartan_module_cls_loader_sp.get(), mid, utf_str_sp.get());
     was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
     if (was_exception_raised) {
       log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
-      return std::make_pair(nullptr, was_exception_raised);
+      return std::make_pair(nullptr, true);
     }
   } else {
     jcls = _env->FindClass(_class_name);
@@ -232,9 +275,9 @@ std::pair<shm::ShmAllocator*, bool> jvm_pre_init_ctx::pre_init_for_supervisor_jv
   line_nbr = __LINE__ + 1;
   defer_jobj_t serialized_cmd_dispatch_info_sp{ _env->CallStaticObjectMethod(jcls, get_cmd_dispatch_info), defer_jobj };
   was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
-  if (was_exception_raised) {
+  if (was_exception_raised || !serialized_cmd_dispatch_info_sp) {
     log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
-    return std::make_pair(nullptr, was_exception_raised);
+    return std::make_pair(nullptr, true);
   }
 
   auto const serialized_module_paths = reinterpret_cast<jbyteArray>(serialized_module_paths_sp.get());
@@ -388,19 +431,18 @@ std::tuple<jobject, jobject, bool> jvm_pre_init_ctx::invoke_supervisor_jvm_boots
 bool jvm_pre_init_ctx::pre_init_for_child_worker_jvm() {
   DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
 
+  bool was_exception_raised = false;
+
   const auto rtn = shm::read_access(); // get client access of shared memory (throws shared_mem_exception if fails)
   auto const shm_base = std::get<0>(rtn);
   const auto shm_size = std::get<1>(rtn);
   using shm_t = std::remove_pointer<decltype(shm_base)>::type;
   auto const cleanup_shm_client = [shm_size](shm_t *p) { cmd_dsp::unmap_shm_client(p, shm_size); };
   std::unique_ptr<shm_t, decltype(cleanup_shm_client)> raii_shm_data_sp(shm_base, cleanup_shm_client);
-
   const auto block_size = *reinterpret_cast<const int32_t*>(shm_base);
   auto const byte_mem_buf = reinterpret_cast<const jbyte*>(reinterpret_cast<jbyte*>(shm_base) + sizeof(block_size));
 
-  bool was_exception_raised = false;
-
-  if (block_size > 0) {
+  if (block_size > 0) { // if non-zero then indicates Java modularity is in effect (module layer paths byte buffer info)
     jbyteArray const ser_module_paths = _env->NewByteArray(block_size);
     defer_jobj_t ser_module_paths_sp{ ser_module_paths, defer_jobj };
     was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
@@ -424,6 +466,10 @@ bool jvm_pre_init_ctx::pre_init_for_child_worker_jvm() {
       jmethodID const mid = _env->GetStaticMethodID(cls, method_name, childWorkerJvmBootStrap.desc_str());
       if (mid == nullptr) throw 4;
 
+      // restore state of these instance variables
+      _class_name  = class_name_sav;
+      _method_name = method_name_sav;
+
       const auto is_debug = static_cast<jboolean>(get_level() <= LL::DEBUG ? JNI_TRUE : JNI_FALSE);
 
       jobject const module_layer = _env->CallStaticObjectMethod(cls, mid, ser_module_paths, is_debug);
@@ -433,10 +479,6 @@ bool jvm_pre_init_ctx::pre_init_for_child_worker_jvm() {
       if (!was_exception_raised && module_layer_sp) {
         was_exception_raised = set_system_boot_layer(module_layer_sp.get());
       }
-
-      // restore state of these instance variables
-      _class_name  = class_name_sav;
-      _method_name = method_name_sav;
     }
   }
 
@@ -460,11 +502,90 @@ bool jvm_pre_init_ctx::set_system_boot_layer(jobject module_layer) {
   auto const bootLayer_field_id = _env->GetStaticFieldID(sys_cls, bootLayer_fld, sys_bootLayer_field.desc_str());
   if (bootLayer_field_id == nullptr) throw 4;
 
+  // restore state of these instance variables
+  _class_name  = class_name_sav;
+  _method_name = method_name_sav;
+
   _env->SetStaticObjectField(sys_cls, bootLayer_field_id, module_layer);
+  return _env->ExceptionCheck() != JNI_FALSE;
+}
+
+std::pair<jobject, bool> jvm_pre_init_ctx::get_module_layer_class_loader() {
+  DECL_DEFER_SMART_PTR(defer_jobj_t, defer_jobj);
+
+  bool was_exception_raised = false;
+
+  const auto rtn = shm::read_access(); // get client access of shared memory (throws shared_mem_exception if fails)
+  auto const shm_base = std::get<0>(rtn);
+  const auto shm_size = std::get<1>(rtn);
+  using shm_t = std::remove_pointer<decltype(shm_base)>::type;
+  auto const cleanup_shm_client = [shm_size](shm_t *p) { cmd_dsp::unmap_shm_client(p, shm_size); };
+  std::unique_ptr<shm_t, decltype(cleanup_shm_client)> raii_shm_data_sp(shm_base, cleanup_shm_client);
+  const auto block_size = *reinterpret_cast<const int32_t*>(shm_base);
+
+  if (block_size <= 0) return std::make_pair(nullptr, was_exception_raised);
+
+  // if block_size is non-zero then indicates Java modularity is in effect (module layer paths byte buffer info)
+  const methodDescriptor sys_bootLayer_field{ make_System_bootLayer_descriptor() };
+  const char *const sys_class_name = strdupa(sys_bootLayer_field.c_str());
+  const char *const bootLayer_fld = split_method_name_from_class_name(sys_class_name, sys_bootLayer_field.c_str());
+
+  // save state of these instance variables (may be referenced in caught exception handling in invoke_java_method())
+  const char* const class_name_sav  = _class_name;
+  const char* const method_name_sav = _method_name;
+
+  _class_name = sys_class_name;
+  jclass const sys_cls = _env->FindClass(sys_class_name);
+  if (sys_cls == nullptr) throw 3;
+
+  _method_name = bootLayer_fld;
+  auto const bootLayer_field_id = _env->GetStaticFieldID(sys_cls, bootLayer_fld, sys_bootLayer_field.desc_str());
+  if (bootLayer_field_id == nullptr) throw 4;
+
+  int line_nbr = __LINE__ + 1;
+  auto const module_layer = _env->GetStaticObjectField(sys_cls, bootLayer_field_id);
+  defer_jobj_t module_layer_sp{ module_layer, defer_jobj };
+  was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+  if (was_exception_raised || !module_layer_sp) {
+    // restore state of these instance variables
+    _class_name  = class_name_sav;
+    _method_name = method_name_sav;
+    log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+    return std::make_pair(nullptr, true);
+  }
+
+  const methodDescriptor find_loader{ make_ModuleLayer_findLoader_descriptor() };
+  const char *const module_layer_cls_name = strdupa(find_loader.c_str());
+  const char *const findLoader_method = split_method_name_from_class_name(module_layer_cls_name, find_loader.c_str());
+
+  _class_name = module_layer_cls_name;
+  jclass const mod_layer_cls = _env->GetObjectClass(module_layer_sp.get());
+  if (mod_layer_cls == nullptr) throw 3;
+
+  _method_name = findLoader_method;
+  auto const mid = _env->GetMethodID(mod_layer_cls, findLoader_method, find_loader.desc_str());
+  if (mid == nullptr) throw 4;
 
   // restore state of these instance variables
   _class_name  = class_name_sav;
   _method_name = method_name_sav;
 
-  return _env->ExceptionCheck() != JNI_FALSE;
+  line_nbr = __LINE__ + 1;
+  defer_jobj_t utf_str_sp{ _env->NewStringUTF(spartan_launcher_module_name), defer_jobj };
+  was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+  if (was_exception_raised || !utf_str_sp) {
+    log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+    return std::make_pair(nullptr, true);
+  }
+
+  line_nbr = __LINE__ + 1;
+  auto const spartan_module_cls_loader = _env->CallObjectMethod(module_layer_sp.get(), mid, utf_str_sp.get());
+  defer_jobj_t spartan_module_cls_loader_sp{ spartan_module_cls_loader, defer_jobj };
+  was_exception_raised = _env->ExceptionCheck() != JNI_FALSE;
+  if (was_exception_raised || !spartan_module_cls_loader_sp) {
+    log(LL::FATAL, unexpected_err_fmt, __FUNCTION__, line_nbr);
+    return std::make_pair(nullptr, true);
+  }
+
+  return std::make_pair(spartan_module_cls_loader_sp.release(), was_exception_raised);
 }

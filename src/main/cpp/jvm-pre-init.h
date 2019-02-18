@@ -28,8 +28,6 @@ using JNIEnv = JNIEnv_;
 namespace shm {
   class ShmAllocator;
 }
-class methodDescriptorBase;
-struct sessionState;
 
 namespace jvm_pre_init {
 
@@ -42,6 +40,7 @@ namespace jvm_pre_init {
     JNIEnv *const _env;
     const char *&_class_name;
     const char *&_method_name;
+    const WhichMethod whichMethod;
   public:
     /**
      * Constructor.
@@ -55,9 +54,11 @@ namespace jvm_pre_init {
      * @param method_name set the name of a method to be searched for into this variable
      * so that if an exception is thrown, the invoke_java_method(..) catch handler will
      * have access to its name for error logging
+     *
+     * @param whichMethod the kind of method per the WhichMethod enumeration classification
      */
-    jvm_pre_init_ctx(JNIEnv *env, const char *&class_name, const char *&method_name)
-        : _env(env), _class_name(class_name), _method_name(method_name) {}
+    jvm_pre_init_ctx(JNIEnv *env, const char *&class_name, const char *&method_name, WhichMethod whichMethod = WM::NONE)
+        : _env(env), _class_name(class_name), _method_name(method_name), whichMethod(whichMethod) {}
     jvm_pre_init_ctx() = delete;
     jvm_pre_init_ctx(const jvm_pre_init_ctx &) = delete;
     jvm_pre_init_ctx(jvm_pre_init_ctx &&) = delete;
@@ -65,13 +66,17 @@ namespace jvm_pre_init {
     jvm_pre_init_ctx &operator=(jvm_pre_init_ctx &&) = delete;
     ~jvm_pre_init_ctx() = default;
   public:
+    static methodDescriptor make_ClassLoader_loadClass_descriptor();
     static methodDescriptor make_obtainSerializedAnnotationInfo_descriptor();
     /**
-     * A helper method that is called by invoke_java_method(..) to set the system class loader
-     * as the current thread class loader. Any by-int-value exceptions thrown are handled in
-     * the function invoke_java_method(..).
+     * A helper method that is called by invoke_java_method(..) to set an appropriate class loader
+     * as the current thread class loader. Any by-int-value exceptions thrown are handled in the
+     * function invoke_java_method(..).
+     *
+     * @return pair result consisting of module layer class loader (or null if no module layer is
+     * in effect) and a flag which will indicate if an Java exception has been thrown
      */
-    void set_thread_class_loader_context();
+    std::pair<jobject, bool> set_thread_class_loader_context();
     /**
      * A helper method that is called to do a pre-initialization phase in the supervisor Java JVM
      * instance prior to invoking the Spartan service main(..) method. Any by-int-value exceptions
@@ -99,6 +104,7 @@ namespace jvm_pre_init {
   private:
     std::tuple<jobject, jobject, bool> invoke_supervisor_jvm_bootstrap();
     bool set_system_boot_layer(jobject module_layer);
+    std::pair<jobject, bool> get_module_layer_class_loader();
   };
 
 } // namespace jvm_pre_init

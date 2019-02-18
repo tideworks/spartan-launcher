@@ -585,15 +585,32 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
 
     JNIEnv * const env = env_sp.get();
 
-    // set system class loader on current thread context
-    jvm_pre_init_ctx{env, class_name, method_name}.set_thread_class_loader_context();
-
     auto const defer_jobj = [env](jobject p) {
       if (p != nullptr) {
         env->DeleteLocalRef(p);
       }
     };
     using defer_jobj_t = defer_jobj_sp_t<decltype(defer_jobj)>;
+
+    auto const pre_exit_on_exception = [env]() -> int {
+      // handles case of when a Java exception was thrown
+      const auto excptn_str = StdOutCapture::capture_stdout_stderr([env]() { env->ExceptionDescribe(); });
+      logm(LL::ERR, excptn_str.c_str());
+      if (getpid() == get_parent_pid()) {
+        quit_launcher_on_term_code(EXIT_FAILURE); // let the parent process know to terminate
+      }
+      return EXIT_FAILURE;
+    };
+
+    // set an appropriate class loader on current thread context
+    const auto rslt = jvm_pre_init_ctx{env, class_name, method_name,
+                                       method_descriptor.which_method()}.set_thread_class_loader_context();
+
+    defer_jobj_t spartan_module_cls_loader_sp{ std::get<0>(rslt), defer_jobj }; // maybe set to null if no module layer
+    bool was_exception_raised = std::get<1>(rslt);
+    if (was_exception_raised) {
+      return pre_exit_on_exception();
+    }
 
     auto const defer_jstr = [env](jstring p) {
       if (p != nullptr) {
@@ -602,7 +619,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
     };
     using defer_jstr_t = defer_jstr_sp_t<decltype(defer_jstr)>;
 
-    defer_jobj_t spJargs_array(nullptr, defer_jobj);
+    defer_jobj_t spJargs_array{nullptr, defer_jobj};
 
     jobjectArray jargs = nullptr;
     if (argv != nullptr) {
@@ -620,8 +637,51 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
       jargs = jargs_tmp;
     }
 
-    jclass const cls = env->FindClass(class_name);
-    if (cls == nullptr) throw 3;
+    defer_jobj_t cls_sp{nullptr, defer_jobj};
+
+    if (spartan_module_cls_loader_sp) {
+      const methodDescriptor load_class{ jvm_pre_init_ctx::make_ClassLoader_loadClass_descriptor() };
+      const char* const class_loader_cls_name = strdupa(load_class.c_str());
+      const char *const loadClass_method = cmd_dsp::split_method_name_from_class_name(class_loader_cls_name,
+                                                                                      load_class.c_str());
+
+      // save state of these instance variables
+      const char* const class_name_sav  = class_name;
+      const char* const method_name_sav = method_name;
+
+      class_name = class_loader_cls_name;
+      auto const cls_loader_cls = env->GetObjectClass(spartan_module_cls_loader_sp.get());
+      if (cls_loader_cls == nullptr) throw 3;
+
+      method_name = loadClass_method;
+      auto const mid = env->GetMethodID(cls_loader_cls, loadClass_method, load_class.desc_str());
+      if (mid == nullptr) throw 4;
+
+      // restore state of these instance variables
+      class_name  = class_name_sav;
+      method_name = method_name_sav;
+
+      std::string spartan_startup_cls_name{ class_name };
+      std::replace( spartan_startup_cls_name.begin(), spartan_startup_cls_name.end(), '/', '.');
+
+      defer_jobj_t utf_str_sp{ env->NewStringUTF(spartan_startup_cls_name.c_str()), defer_jobj };
+      was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
+      if (was_exception_raised || !utf_str_sp) {
+        return pre_exit_on_exception();
+      }
+
+      cls_sp.reset(env->CallObjectMethod(spartan_module_cls_loader_sp.get(), mid, utf_str_sp.get()));
+      was_exception_raised = env->ExceptionCheck() != JNI_FALSE;
+      if (was_exception_raised || !cls_sp) {
+        return pre_exit_on_exception();
+      }
+    } else {
+      cls_sp.reset(env->FindClass(class_name));
+      if (!cls_sp) throw 3;
+    }
+
+    auto const cls = (jclass) cls_sp.get();
+
     // get the entry point method
     jmethodID const mid = invoke_as_static ? env->GetStaticMethodID(cls, method_name, method_signature) :
                                              env->GetMethodID(cls, method_name, method_signature);
@@ -657,7 +717,7 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
     log(LL::DEBUG, "%s() Spartan object instance is %s", __func__, mObj == nullptr ? "null" : "non-null");
 
     try {
-      bool was_exception_raised = false;
+      was_exception_raised = false;
       auto inner_deref_jargs_array_sp = std::move(spJargs_array);
 
       const auto which_method = method_descriptor.which_method();
@@ -922,19 +982,17 @@ static int invoke_java_method(JavaVM *const jvmp, const methodDescriptorBase &me
       if (was_exception_raised) {
         const auto excptn_str = StdOutCapture::capture_stdout_stderr([env]() { env->ExceptionDescribe(); });
         logm(LL::ERR, excptn_str.c_str());
-        return EXIT_FAILURE;
+        ret = EXIT_FAILURE;
       }
     } catch(int which) {
       throw; // let outer int catch handler process these
     } catch(...) {
-      env_sp.reset(nullptr); // clean this up now as about to exit the process
       const auto ex_nm = get_unmangled_name(abi::__cxa_current_exception_type()->name());
       log(LL::ERR, "process %d Java method %s.%s(..) terminating due to unhandled exception of type %s",
           getpid(), class_name, method_name, ex_nm.c_str());
-      _exit(EXIT_FAILURE);
+      ret = EXIT_FAILURE;
     }
   } catch(const std::string &full_method_name_str) {
-    env_sp.reset(nullptr); // clean this up now so don't get in race condition with exit of parent thread
     log(LL::ERR, "%s() invalid specification of method entry point \"%s\"", __func__, full_method_name_str.c_str());
     ret = EXIT_FAILURE;
   } catch(int which) {
