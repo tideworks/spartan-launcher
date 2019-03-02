@@ -36,7 +36,7 @@ limitations under the License.
 #include "fifo-pipe.h"
 #include "log.h"
 #include "so-export.h"
-#include "spartan_LaunchProgram.h"
+#include "spartan_launcher_LaunchProgram.h"
 #include "launch-program.h"
 
 //#undef NDEBUG // uncomment this line to enable asserts in use below
@@ -411,11 +411,11 @@ static bool check_result(JNIEnv *env, const char *exception_cls, T item,
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    log
  * Signature: (ILjava/lang/String;)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_log
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_log
     (JNIEnv *env, jclass /*cls*/, jint level, jstring msg) {
   struct {
     jboolean    isCopy;
@@ -710,21 +710,21 @@ static jobject launchProgram_core_invokeCommand(
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    invokeCommand
  * Signature: ([Ljava/lang/String;)Lspartan/Spartan/InvokeResponse;
  */
-extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommand
+extern "C" JNIEXPORT jobject JNICALL Java_spartan_launcher_LaunchProgram_invokeCommand
     (JNIEnv *env, jclass cls, jobjectArray args) {
   return launchProgram_core_invokeCommand(env, cls, args);
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    invokeCommandEx
  * Signature: ([Ljava/lang/String;)Lspartan/Spartan/InvokeResponseEx;
  */
-extern "C" JNIEXPORT jobject JNICALL Java_spartan_LaunchProgram_invokeCommandEx
+extern "C" JNIEXPORT jobject JNICALL Java_spartan_launcher_LaunchProgram_invokeCommandEx
     (JNIEnv *env, jclass cls, jobjectArray args) {
   return launchProgram_core_invokeCommand(env, cls, args, true);
 }
@@ -747,81 +747,81 @@ static void killpg_helper(JNIEnv * const env, const pid_t pid, const int sig, co
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    killSIGINT
  * Signature: (I)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killSIGINT
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_killSIGINT
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpid_helper(env, pid, SIGINT, "SIGINT");
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    killSIGTERM
  * Signature: (I)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killSIGTERM
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_killSIGTERM
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpid_helper(env, pid, SIGTERM, "SIGTERM");
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    killSIGKILL
  * Signature: (I)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killSIGKILL
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_killSIGKILL
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpid_helper(env, pid, SIGKILL, "SIGKILL");
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    killProcessGroupSIGINT
  * Signature: (I)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killProcessGroupSIGINT
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_killProcessGroupSIGINT
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpg_helper(env, pid, SIGINT, "SIGINT");
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    killProcessGroupSIGTERM
  * Signature: (I)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killProcessGroupSIGTERM
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_killProcessGroupSIGTERM
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpg_helper(env, pid, SIGTERM, "SIGTERM");
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    killProcessGroupSIGKILL
  * Signature: (I)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_killProcessGroupSIGKILL
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_killProcessGroupSIGKILL
     (JNIEnv *env, jclass /*cls*/, jint pid) {
   killpg_helper(env, pid, SIGKILL, "SIGKILL");
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    getSysThreadID
  * Signature: ()J
  */
-extern "C" JNIEXPORT jlong JNICALL Java_spartan_LaunchProgram_getSysThreadID
+extern "C" JNIEXPORT jlong JNICALL Java_spartan_launcher_LaunchProgram_getSysThreadID
     (JNIEnv */*env*/, jclass /*cls*/) {
   return syscall(SYS_gettid);
 }
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    sysThreadInterrupt
  * Signature: (J)V
  */
-extern "C" JNIEXPORT void JNICALL Java_spartan_LaunchProgram_sysThreadInterrupt
+extern "C" JNIEXPORT void JNICALL Java_spartan_launcher_LaunchProgram_sysThreadInterrupt
     (JNIEnv *env, jclass /*cls*/, jlong sysThrdId) {
   log(LL::DEBUG, ">> %s()", __func__);
   termination_flag = true;
@@ -835,11 +835,11 @@ enum class PidFileLocation : int { VAR_RUN_DIR = 1, USER_HOME_DIR, EXE_DIR, CURR
 using PFL = PidFileLocation;
 
 /*
- * Class:     spartan_LaunchProgram
+ * Class:     spartan_launcher_LaunchProgram
  * Method:    isFirstInstance
  * Signature: (Ljava/lang/String;)Z
  */
-extern "C" JNIEXPORT jboolean JNICALL Java_spartan_LaunchProgram_isFirstInstance
+extern "C" JNIEXPORT jboolean JNICALL Java_spartan_launcher_LaunchProgram_isFirstInstance
     (JNIEnv *env, jclass /*cls*/, jstring progName) {
   log(LL::DEBUG, ">> %s()", __func__);
   jboolean rtn = JNI_TRUE;
