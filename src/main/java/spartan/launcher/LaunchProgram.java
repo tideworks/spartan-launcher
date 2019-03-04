@@ -18,11 +18,54 @@ limitations under the License.
 */
 package spartan.launcher;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.function.BiFunction;
+
 import static spartan.Spartan.*;
 
 public class LaunchProgram {
   static {
-    System.loadLibrary("spartan-shared");
+    final String spartanSharedLibName = "spartan-shared";
+    final BiFunction<String, String[], Path> getPath = FileSystems.getDefault()::getPath;
+    final String[] mappedLibName = { System.mapLibraryName(spartanSharedLibName) };
+    final String libsPath = System.getProperty("java.library.path", ".");
+    final String[] libPaths = libsPath.split(File.pathSeparator);
+    boolean found = false;
+    for (final String libDirpath : libPaths) {
+      final Path libFilepath = getPath.apply(libDirpath, mappedLibName);
+      if (Files.exists(libFilepath)) {
+        BasicFileAttributes attrs;
+        try {
+          attrs = Files.readAttributes(libFilepath, BasicFileAttributes.class);
+        } catch (IOException e) {
+          System.err.printf("WRN: failed accessing native lib:%n\t\"%s\"%n", libFilepath);
+          e.printStackTrace(System.err);
+          System.err.flush();
+          continue;
+        }
+        if (!attrs.isDirectory() && !attrs.isOther()) {
+          try {
+            System.err.printf("DBG: attempt loading native lib:%n\t\"%s\"%n", libFilepath);
+            System.load(libFilepath.toString());
+            found = true;
+            System.err.printf("DBG: completed loading native lib:%n\t\"%s\"%n", libFilepath);
+          } catch (Throwable e) {
+            System.err.printf("ERR: failed loading native lib:%n\t\"%s\"%n", libFilepath);
+            e.printStackTrace(System.err);
+            System.err.flush();
+          }
+
+        }
+      }
+    }
+    if (!found) {
+      System.loadLibrary(spartanSharedLibName);
+    }
   }
   public static native void log(int level, String msg);
   public static native InvokeResponse invokeCommand(String[] args)
